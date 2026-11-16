@@ -1,0 +1,50 @@
+---
+import { render } from 'astro:content';
+import Base from '../layouts/Base.astro';
+import { ui, type Lang } from '../lib/i18n';
+import { slugOf, type Lesson } from '../lib/lessons';
+import { url } from '../lib/paths';
+
+interface Props {
+  lang: Lang;
+  lesson: Lesson;
+  prev?: Lesson;
+  next?: Lesson;
+}
+const { lang, lesson, prev, next } = Astro.props;
+const t = ui[lang];
+const { Content } = await render(lesson);
+---
+
+<Base title={lesson.data.title} description={lesson.data.description} lesson={lesson.id} lang={lang}>
+  <p class="lesson-meta">{lesson.data.module} · {t.lesson} {lesson.data.order} · {lesson.data.minutes} min · {lesson.data.tools.join(', ')}</p>
+  <h1>{lesson.data.title}</h1>
+  <p class="lede">{lesson.data.description}</p>
+
+  <article>
+    <Content />
+  </article>
+
+  <div class="lesson-footer">
+    <span>{prev && <a href={url(`lessons/${slugOf(prev)}/`, lang)}>← {prev.data.title}</a>}</span>
+    <button type="button" class="btn-ghost" data-complete={lesson.id} data-label={t.markComplete} data-done={t.completed}>{t.markComplete}</button>
+    <span>{next ? <a href={url(`lessons/${slugOf(next)}/`, lang)}>{next.data.title} →</a> : <a href={url('', lang)}>{t.allLessons}</a>}</span>
+  </div>
+</Base>
+
+<script>
+  import { getCompleted, setCompleted } from '../lib/progress';
+  const btn = document.querySelector<HTMLButtonElement>('[data-complete]')!;
+  const id = btn.dataset.complete!;
+  const paint = () => {
+    const done = getCompleted().has(id);
+    btn.textContent = done ? btn.dataset.done! : btn.dataset.label!;
+    btn.setAttribute('aria-pressed', String(done));
+  };
+  btn.addEventListener('click', () => {
+    setCompleted(id, !getCompleted().has(id));
+    paint();
+  });
+  document.addEventListener('dsw:progress', paint);
+  paint();
+</script>

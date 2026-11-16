@@ -1,0 +1,96 @@
+=== 5453e9ba
+El SQL que escribirás todos los días
+=== 51ab65e0
+Joins sin contar dos veces, CTE, funciones de ventana, anti-joins y lógica de fechas, sobre un esquema como el de un warehouse.
+=== 541a2fe9
+Trabajar con datos
+=== ab14ed6b
+En el trabajo, la mayoría de los datos vive en un warehouse SQL (Snowflake, BigQuery, Redshift, Postgres) y la mayoría de los análisis empieza con una consulta. Estas celdas ejecutan **DuckDB**, una base de datos analítica que corre dentro del proceso y cuyo SQL se parece mucho al que aceptan esos warehouses. Donde los dialectos difieren, la lección lo indica.
+=== ff58568c
+Ejecuta esto una vez para cargar las tablas de Bramble en la base de datos.
+=== cb2939ef
+Las celdas SQL de abajo ejecutan tu consulta y muestran el resultado. (El resultado también se guarda como un DataFrame de pandas llamado `result`, que es lo que leen las comprobaciones.)
+=== b436a99f
+## Agregar en el tiempo
+=== 7d1b46c2
+El patrón que más vas a escribir: filtrar, truncar una fecha a un período y agregar. Fíjate en el rango de fechas semiabierto y en la cláusula `FILTER` para los conteos condicionales (en BigQuery se escribe `COUNTIF(...)`; en cualquier motor funciona `SUM(CASE WHEN ... THEN 1 ELSE 0 END)`).
+=== ff04a723
+**1.** Una variación para el equipo de operaciones: para cada `device`, el número de pedidos completados (`orders`) y el valor medio del pedido redondeado a 2 decimales (`aov`), para los pedidos de **noviembre de 2024**. Ordena por `orders`, de mayor a menor.
+=== 4e50f55f
+`WHERE status = 'completed' AND order_ts >= DATE '2024-11-01' AND order_ts < DATE '2024-12-01'` y después `GROUP BY device ORDER BY orders DESC`.
+=== d07b7dd3
+tus agregados aquí
+=== d8958853
+## Los joins y la trampa de la multiplicación de filas
+=== ce3eae36
+El error más caro en SQL es un join que multiplica filas en silencio. `orders` tiene una fila por pedido; `order_items` tiene una fila por producto dentro de un pedido. Si las unes, el `total` de cada pedido se repite una vez por artículo:
+=== 9dd72c2f
+La cifra inflada parece plausible, y por eso acaba en los dashboards. Reglas que lo evitan:
+=== e13cdaae
+- Conoce la **granularidad** de cada tabla que unes y agrega a una granularidad común *antes* del join.
+- Cada medida pertenece a una granularidad. Las medidas a nivel de pedido (`total`, `shipping_fee`) nunca deben sumarse a nivel de artículo.
+- Después de cualquier join, compara `count(*)` con el número de filas que esperabas.
+=== 04935742
+**2.** Los ingresos por categoría de producto hay que construirlos con medidas a nivel de artículo. Para los pedidos **completados**, devuelve `category`, `units` (suma de `quantity`) y `revenue` (suma de `quantity * unit_price`, redondeada a 2 decimales), ordenado por ingresos de mayor a menor.
+=== 44fd6601
+Une también `orders` para poder filtrar por `o.status = 'completed'`. La granularidad sigue siendo el artículo, así que sumar medidas de artículo es seguro.
+=== a2100ac2
+## Encontrar lo que falta: anti-joins
+=== 2397e2f1
+«Qué clientes *nunca* han hecho X» se resuelve con `LEFT JOIN ... WHERE right.key IS NULL` o con `NOT EXISTS`. Evita `NOT IN (subconsulta)`: si la subconsulta devuelve un solo `NULL`, no devuelve ninguna fila.
+=== 38feb4f7
+Clientes sin ningún ticket de soporte, por canal
+=== f395ab35
+**3.** El equipo de CRM quiere una lista de recuperación: clientes que se registraron en el **primer semestre de 2024** y **no tienen ningún pedido completado**. Devuelve una fila por `channel` con `signups` (todos los registros del semestre) y `never_ordered` (los que no tienen un pedido completado), ordenado por canal.
+=== 396bab07
+Haz un left join con una subconsulta de `customer_id` distintos de los pedidos completados; después, `count(*)` para signups y `count(*) FILTER (WHERE o.customer_id IS NULL)` para never_ordered.
+=== c296a873
+## CTE y funciones de ventana
+=== db9ae7bf
+Las consultas reales se construyen en pasos con nombre usando `WITH`. Las funciones de ventana calculan después valores por fila *a partir de filas relacionadas*, sin colapsarlas. Las tres que necesitas constantemente:
+=== 56970548
+| Necesidad | Función de ventana |
+| --- | --- |
+| Primera / última fila, o las N primeras, por grupo | `row_number() OVER (PARTITION BY ... ORDER BY ...)` |
+| Valor de la fila anterior | `lag(x) OVER (PARTITION BY ... ORDER BY ...)` |
+| Totales acumulados o móviles | `sum(x) OVER (ORDER BY ... ROWS BETWEEN ...)` |
+=== 582a22b2
+Este es «el último ticket de cada cliente». `QUALIFY` filtra por el resultado de una ventana (Snowflake, BigQuery, DuckDB, Databricks). En Postgres o Redshift, envuelve la consulta en una CTE y filtra con `WHERE rn = 1`.
+=== debe5ad8
+**4.** Merchandising pide los **3 productos con más ingresos de cada categoría** (pedidos completados). Devuelve `category`, `name`, `revenue` (redondeado a 2 decimales) y `rank` (de 1 a 3), ordenado por categoría y después por rank.
+=== 529bab96
+Añade `row_number() OVER (PARTITION BY category ORDER BY revenue DESC) AS rank` al SELECT final y después `QUALIFY rank <= 3`.
+=== 5e2378fa
+**5.** «Nuevos frente a recurrentes» aparece en todos los dashboards comerciales. Para cada mes de **2024**, cuenta los pedidos completados que fueron el **primer pedido completado** de un cliente (`new_orders`) y los que no (`repeat_orders`). Columnas: `month`, `new_orders`, `repeat_orders`, ordenado por mes.
+=== 3912a42d
+Numera los pedidos de cada cliente *antes* de filtrar a 2024; si no, el primer pedido de 2024 de cada cliente parecerá «nuevo».
+=== 3b82dfbc
+Conserva la CTE. En el SELECT final: `date_trunc('month', order_ts) AS month`, `count(*) FILTER (WHERE order_number = 1)`, `count(*) FILTER (WHERE order_number > 1)`, con el filtro de fechas de 2024 en el WHERE final.
+=== b2ec3b1b
+**6.** ¿Cuánto esperan los clientes entre una compra y la siguiente? Usa `lag` para obtener, en cada pedido completado, la fecha del pedido anterior del mismo cliente; después devuelve, por `channel` de adquisición, la **mediana** de días entre pedidos consecutivos como `median_gap_days` y el número de intervalos como `gaps`. Ordena por canal.
+=== b2930369
+Une `gaps` con `customers`, conserva las filas `WHERE prev_ts IS NOT NULL` y calcula `median(date_diff('day', prev_ts, order_ts))` y `count(*)` agrupando por canal.
+=== 9839ad53
+## Los NULL muerden sin avisar
+=== 3438e963
+count(col) ignora los NULL
+=== 6ec9d43b
+avg también: esta es la media de las encuestas respondidas
+=== ec57e9d0
+tratar "sin respuesta" como 0 casi nunca es correcto
+=== d6fa6df5
+NULL <> 5 es NULL, no TRUE: las filas sin respuesta desaparecen
+=== 4fa29a44
+## De SQL a Python y de vuelta
+=== 9bfceda5
+En un notebook lo habitual es traer el resultado de una consulta a un DataFrame; además, DuckDB puede consultar directamente DataFrames y archivos.
+=== 8655acf7
+...y SQL sobre un DataFrame que solo existe en Python:
+=== f1f0e3e6
+Consulta un warehouse real desde Python
+=== 7751da56
+Contra un warehouse te conectas con un driver, **nunca construyes el SQL pegando valores dentro de cadenas de texto** y dejas que la base de datos haga el trabajo pesado.
+=== 86de0f82
+¿No tienes un warehouse a mano? Levanta Postgres en local con `docker run --rm -e POSTGRES_PASSWORD=pw -p 5432:5432 postgres:17`, carga una tabla con `orders.to_sql("orders", engine)` y ejecuta contra él los ejercicios 4 y 5. Postgres admite `FILTER` pero no `QUALIFY` ni `GROUP BY ALL`, así que tendrás que reescribir esas partes; esa traducción es el ejercicio.
+=== e109bada
+Diferencias de dialecto con las que te toparás en tu primera semana: BigQuery usa `DATE_TRUNC(order_ts, MONTH)` y nombres de tabla entre acentos graves; Snowflake pasa a mayúsculas los identificadores sin comillas; Postgres no tiene `QUALIFY`; `GROUP BY ALL` existe en DuckDB, Snowflake, BigQuery y Databricks, pero no en Postgres.

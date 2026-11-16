@@ -57,3 +57,15 @@ test('lesson is marked complete on the home page', async ({ page }) => {
   await expect(page.locator('a.lesson-card[data-lesson="02-sql"]')).toHaveClass(/done/);
   await expect(page.getByRole('link', { name: 'Continue' })).toBeVisible();
 });
+
+test('Spanish lessons give feedback in Spanish', async ({ page }) => {
+  await page.goto('es/lessons/02-sql/');
+  const exercise = page.locator('py-cell[data-check]').first();
+  await exercise.getByRole('button', { name: /Ejecutar/ }).click();
+  await expect(exercise.getByRole('button', { name: /Ejecutar/ })).toBeEnabled();
+  await expect(exercise.locator('.cell-out')).toContainText('Todavía no: faltan columnas'); // message from dsw.same
+  await exercise.locator('summary', { hasText: 'Solución' }).click();
+  await exercise.getByRole('button', { name: 'Copiar al editor' }).click();
+  await exercise.getByRole('button', { name: /Ejecutar/ }).click();
+  await expect(exercise.locator('.cell-out')).toContainText('✓ Correcto.');
+});

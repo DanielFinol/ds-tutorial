@@ -1,0 +1,69 @@
+---
+import Base from '../layouts/Base.astro';
+import { ui, type Lang } from '../lib/i18n';
+import { getLessons, groupByModule, slugOf } from '../lib/lessons';
+import { url } from '../lib/paths';
+
+interface Props {
+  lang: Lang;
+}
+const { lang } = Astro.props;
+const t = ui[lang];
+const lessons = await getLessons(lang);
+const modules = groupByModule(lessons);
+const hours = Math.round(lessons.reduce((s, l) => s + l.data.minutes, 0) / 60);
+---
+
+<Base title={t.site} lang={lang}>
+  <h1>{t.site}</h1>
+  <p class="lede">{t.lede(lessons.length, hours)}</p>
+  <p>
+    <a class="btn" href={url(`lessons/${slugOf(lessons[0])}/`, lang)} style="text-decoration:none" data-start data-continue={t.continue}>{t.start}</a>
+    <span class="progress-note" data-progress={t.progress}></span>
+  </p>
+
+  {
+    modules.map(([name, items]) => (
+      <section class="module">
+        <h2>{name}</h2>
+        <ul class="lesson-list">
+          {items.map((l) => (
+            <li>
+              <a class="lesson-card" href={url(`lessons/${slugOf(l)}/`, lang)} data-lesson={l.id}>
+                <span class="num">{l.data.order}</span>
+                <div>
+                  <h3>{l.data.title}</h3>
+                  <p>{l.data.description}</p>
+                  <p class="tools">{l.data.tools.join(' · ')} · {l.data.minutes} min</p>
+                </div>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    ))
+  }
+</Base>
+
+<script>
+  import { getCompleted } from '../lib/progress';
+  const done = getCompleted();
+  const cards = [...document.querySelectorAll<HTMLAnchorElement>('[data-lesson]')];
+  for (const el of cards) {
+    if (done.has(el.dataset.lesson!)) {
+      el.classList.add('done');
+      el.querySelector('.num')!.textContent = '✓';
+    }
+  }
+  const n = cards.filter((c) => c.classList.contains('done')).length;
+  if (n) {
+    const note = document.querySelector<HTMLElement>('[data-progress]')!;
+    note.textContent = ' ' + note.dataset.progress!.replace('{n}', String(n)).replace('{total}', String(cards.length));
+    const next = cards.find((c) => !c.classList.contains('done'));
+    const start = document.querySelector<HTMLAnchorElement>('[data-start]')!;
+    if (next) {
+      start.href = next.href;
+      start.textContent = start.dataset.continue!;
+    }
+  }
+</script>

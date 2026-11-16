@@ -447,6 +447,11 @@ def export(folder: str = "data") -> list[str]:
 
 
 # --------------------------------------------------------------------------- exercise checks
+def _t(en: str, es: str) -> str:
+    """Feedback text in the learner's language (the site sets DSW_LANG)."""
+    return es if os.environ.get("DSW_LANG") == "es" else en
+
+
 def same(result, expected, *, ordered: bool = False, rtol: float = 1e-6) -> None:
     """Assert that `result` holds the same data as `expected` (used by exercise
     checks). Column order, extra columns and letter case of names are ignored;
@@ -455,15 +460,15 @@ def same(result, expected, *, ordered: bool = False, rtol: float = 1e-6) -> None
         result = pd.DataFrame(result.to_dicts())
     if hasattr(result, "to_frame") and not isinstance(result, pd.DataFrame):
         result = result.reset_index() if result.index.name else result.to_frame()
-    assert isinstance(result, pd.DataFrame), f"expected a DataFrame, got {type(result).__name__}"
+    assert isinstance(result, pd.DataFrame), _t(f"expected a DataFrame, got {type(result).__name__}", f"se esperaba un DataFrame y se recibió {type(result).__name__}")
     r, e = result.copy(), expected.copy()
     if r.index.name or isinstance(r.index, pd.MultiIndex):
         r = r.reset_index()
     r.columns = [str(c).lower() for c in r.columns]
     e.columns = [str(c).lower() for c in e.columns]
     missing = [c for c in e.columns if c not in r.columns]
-    assert not missing, f"missing column(s) {missing}; yours are {list(r.columns)}"
-    assert len(r) == len(e), f"expected {len(e)} rows, got {len(r)}"
+    assert not missing, _t(f"missing column(s) {missing}; yours are {list(r.columns)}", f"faltan columnas {missing}; las tuyas son {list(r.columns)}")
+    assert len(r) == len(e), _t(f"expected {len(e)} rows, got {len(r)}", f"se esperaban {len(e)} filas y hay {len(r)}")
     r = r[list(e.columns)].reset_index(drop=True)
     e = e.reset_index(drop=True)
 
@@ -487,16 +492,21 @@ def same(result, expected, *, ordered: bool = False, rtol: float = 1e-6) -> None
             try:
                 ok = col_equal(a[c], b[c])
             except Exception:
-                return f"column {c!r} has an unexpected type ({a[c].dtype})"
+                return _t(f"column {c!r} has an unexpected type ({a[c].dtype})", f"la columna {c!r} tiene un tipo inesperado ({a[c].dtype})")
             if not ok.all():
                 i = int(np.argmin(ok))
-                return f"column {c!r} differs (e.g. yours {a[c].iloc[i]!r}, expected {b[c].iloc[i]!r})"
+                return _t(
+                    f"column {c!r} differs (e.g. yours {a[c].iloc[i]!r}, expected {b[c].iloc[i]!r})",
+                    f"la columna {c!r} no coincide (p. ej. el tuyo {a[c].iloc[i]!r}, esperado {b[c].iloc[i]!r})",
+                )
         return None
 
     if ordered:
         diff = first_diff(r, e)
         if diff and first_diff(sort(r), sort(e)) is None:
-            raise AssertionError("the values are right but the rows are in the wrong order")
+            raise AssertionError(
+                _t("the values are right but the rows are in the wrong order", "los valores son correctos pero las filas están en otro orden")
+            )
     else:
         diff = first_diff(sort(r), sort(e))
     assert diff is None, diff
@@ -686,7 +696,14 @@ class FakeLLM:
         ticket = prompt.rsplit("Ticket:", 1)[-1].strip()
         h = int.from_bytes(__import__("hashlib").md5(f"{self.seed}|{ticket}".encode()).digest()[:4], "big")
         r = (h % 10000) / 10000
-        strict = bool(re.search(r"only.{0,40}json|json only|no other text", prompt, re.I))
+        strict = bool(
+            re.search(
+                r"only.{0,40}json|json only|no other text"  # English prompts
+                r"|(solo|sólo|únicamente|solamente).{0,40}json|ning[uú]n otro texto|sin (más|otro) texto",  # Spanish prompts
+                prompt,
+                re.I,
+            )
+        )
         has_labels = all(c in prompt for c in TICKET_CATEGORIES)
         has_examples = prompt.count("Ticket:") >= 3
 

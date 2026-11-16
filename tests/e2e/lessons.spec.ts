@@ -4,17 +4,20 @@ import { readdirSync } from 'node:fs';
 // Runs every cell of every lesson, in order, in a real browser:
 //  - plain cells must run without a Python error;
 //  - exercises must NOT pass as shipped, and MUST pass with their solution.
-const lessons = readdirSync('src/content/lessons')
-  .filter((f) => f.endsWith('.mdx'))
-  .map((f) => f.replace(/\.mdx$/, ''))
-  .sort();
+const list = (dir: string, prefix: string) =>
+  readdirSync(dir)
+    .filter((f) => f.endsWith('.mdx'))
+    .sort()
+    .map((f) => ({ id: prefix + f.replace(/\.mdx$/, ''), path: `${prefix}lessons/${f.replace(/\.mdx$/, '')}/` }));
+// English sources plus the generated Spanish lessons (created by `pnpm build`).
+const lessons = [...list('src/content/lessons', ''), ...list('src/content/lessons/es', 'es/')];
 
 test.describe.configure({ mode: 'parallel' });
 
-for (const id of lessons) {
+for (const { id, path } of lessons) {
   test(`lesson ${id}: all cells run and all solutions pass`, async ({ page }) => {
     test.setTimeout(600_000);
-    await page.goto(`lessons/${id}/`);
+    await page.goto(path);
     const cells = page.locator('py-cell');
     const n = await cells.count();
     expect(n).toBeGreaterThan(0);

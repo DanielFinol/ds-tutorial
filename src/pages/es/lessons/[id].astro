@@ -1,0 +1,16 @@
+---
+import LessonPage from '../../../components/LessonPage.astro';
+import { getLessons, slugOf } from '../../../lib/lessons';
+
+export async function getStaticPaths() {
+  const lessons = await getLessons('es');
+  return lessons.map((lesson, i) => ({
+    params: { id: slugOf(lesson) },
+    props: { lesson, prev: lessons[i - 1], next: lessons[i + 1] },
+  }));
+}
+
+const { lesson, prev, next } = Astro.props;
+---
+
+<LessonPage lang="es" lesson={lesson} prev={prev} next={next} />

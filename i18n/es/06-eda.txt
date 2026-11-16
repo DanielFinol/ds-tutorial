@@ -1,0 +1,110 @@
+=== e675df7e
+Análisis que responde a la pregunta
+=== b93a5c6e
+Métricas asimétricas, comparaciones entre segmentos, retención por cohortes, explicar un cambio y gráficos que un stakeholder entiende en cinco segundos.
+=== 98760257
+Análisis y experimentos
+=== 793e03bc
+En el trabajo, el análisis exploratorio rara vez es abierto. Alguien tiene una pregunta y tú tienes unas horas. Esta lección practica los cinco análisis que cubren la mayoría de esas peticiones.
+=== f607ee8c
+## 1. Resume con honestidad una métrica asimétrica
+=== da5f27d2
+El dinero, las duraciones y los conteos tienen asimetría a la derecha. Una media sola engaña: unos pocos pedidos grandes la arrastran muy por encima de lo que hace un cliente típico. Acompáñala de la **mediana y un percentil alto**, y representa los datos en escala logarítmica.
+=== 02fbbc9d
+Valor del pedido: escala lineal
+=== 19aecfcb
+Los mismos datos: escala logarítmica
+=== 581fedb7
+**1.** *¿Hacen pedidos más grandes los miembros Plus?* Construye `aov`: una fila por cada valor de `plus_member` con `orders` (conteo), `mean`, `median` y `p90` del total de los pedidos completados.
+=== 3d383024
+`with_plus.groupby('plus_member')['total'].agg(orders='count', mean='mean', median='median', p90=lambda s: s.quantile(0.9))`
+=== ad19205f
+sustituye los ... por tu código
+=== fc160a4e
+Por pedido, miembros y no miembros son iguales. Los miembros son más valiosos porque piden más *a menudo*: «más grande» es cierto por cliente, no por pedido. Acertar con la unidad de análisis es la mitad de casi todas las respuestas.
+=== 67fc7697
+## 2. Compara segmentos con su tamaño de muestra
+=== c6ed77a9
+Una tasa sin su denominador es un rumor. Lleva siempre `n` contigo y, cuando los segmentos sean pequeños, prefiere un intervalo a un porcentaje a secas.
+=== 16df466b
+Los intervalos se solapan mucho: aquí no hay evidencia de que ningún país tenga un problema de reembolsos, diga lo que diga la clasificación.
+=== c1ec4c61
+**2.** Los reembolsos por *categoría de producto* necesitan datos a nivel de artículo. Construye `cat_refunds` con una fila por `category`: `n` (número de líneas de pedido) y `rate` (proporción de líneas que pertenecen a un pedido reembolsado), ordenado por `rate` de mayor a menor.
+=== e8e9f505
+Añade una columna booleana con `.assign(refunded=lambda d: d['status'] == 'refunded')` y después `.groupby('category')['refunded'].agg(n='count', rate='mean').sort_values('rate', ascending=False)`.
+=== 49095c28
+## 3. Retención por cohortes
+=== 90f6b5c0
+«¿Se quedan los clientes nuevos tanto como los antiguos?» se responde con una tabla de cohortes: las filas son los meses de registro, las columnas son los meses transcurridos desde el registro y las celdas son la proporción de la cohorte que hizo un pedido en ese mes.
+=== 5907cfc1
+**3.** Construye `retention`: índice = `cohort` (mes de registro) para las cohortes de **2024-01 a 2024-06**, columnas = `month_n` de 0 a 5, valores = proporción de los clientes de la cohorte con al menos un pedido completado en ese mes.
+=== b47bfa4d
+Divide entre el tamaño total de la cohorte (`cohort_size`), no entre el número de clientes que pidieron en el mes 0.
+=== 56aaf3d2
+`active.div(cohort_size.reindex(active.index), axis=0)` divide cada fila entre el tamaño de su cohorte.
+=== dd5df568
+retention debe ser un DataFrame de 6x6, y es {getattr(retention, 'shape', type(retention))}
+=== fc78d509
+los valores deben ser proporciones entre 0 y 1
+=== 95c3294b
+los valores no coinciden: divide cada fila de active entre el tamaño de esa cohorte, p. ej. active.div(cohort_size.reindex(active.index), axis=0)
+=== 7282d8ec
+Proporción de la cohorte que pide cada mes
+=== 5508c8b8
+Léela por columnas: si la retención del mes 2 baja de una cohorte a la siguiente, los clientes nuevos son más débiles. (Ten en cuenta también que la última celda de cada cohorte reciente estaría incompleta si los datos terminaran a mitad de mes: comprueba siempre que la ventana está observada por completo.)
+=== 3698ff93
+## 4. Explica un cambio
+=== 57d7d924
+> **Priya:** Los ingresos de noviembre subieron muchísimo respecto a octubre. ¿Fueron más pedidos o cestas más grandes?
+=== cd32c6de
+Ingresos = pedidos × valor medio del pedido, así que un cambio se descompone de forma exacta en un efecto volumen y un efecto valor.
+=== 2891f83b
+**4.** Con las dos filas de `m` (octubre = `old`, noviembre = `new`), calcula `volume_effect` = (cambio en pedidos) × AOV anterior y `value_effect` = (cambio en AOV) × pedidos nuevos. Juntos deben ser iguales al cambio en ingresos.
+=== 5fbdbd4d
+`(new['orders'] - old['orders']) * old['aov']` y `(new['aov'] - old['aov']) * new['orders']`.
+=== 2eb3ee43
+sustituye los ... por tu código
+=== 12a8d2f1
+volume_effect = (pedidos nuevos - pedidos anteriores) * aov anterior
+=== 69d631a3
+value_effect = (aov nuevo - aov anterior) * pedidos nuevos
+=== c05d8bbc
+los dos efectos deben sumar el cambio en ingresos
+=== 152e2b3d
+La respuesta para Priya: noviembre creció únicamente por **más pedidos**; de hecho, las cestas fueron más baratas, porque la proporción de pedidos con descuento se disparó (Black Friday). Es un hallazgo de una frase con una cifra al lado, que es lo que ella puede usar.
+=== 25a378b1
+## 5. Un gráfico para una diapositiva
+=== 512cdb79
+Un gráfico por defecto muestra datos. Un gráfico de presentación transmite una sola idea: el **título enuncia el hallazgo**, las barras están ordenadas, los valores van etiquetados directamente y se elimina todo lo que no sea dato.
+=== 9a23d1da
+el gráfico por defecto: sin ordenar, etiquetas en vertical, sin mensaje
+=== 2a06d7d9
+**5.** Vuelve a dibujarlo para una diapositiva. Requisitos (la comprobación inspecciona tu `ax`): un gráfico de barras **horizontales** con la **categoría más grande arriba**, un título que enuncie un hallazgo, una etiqueta en el eje x con la unidad y una etiqueta de valor en cada barra.
+=== a4b11f6a
+`ax.set_title('Outdoor y Lighting aportan más de la mitad de los ingresos', loc='left')`, `ax.set_xlabel('Ingresos, millones de $')`, `ax.bar_label(bars, fmt='%.1f', padding=3)`, `ax.grid(False)`.
+=== 1635ab12
+ascendente: barh dibuja la última fila arriba
+=== 455cf5a2
+título, etiqueta del eje, etiquetas de valor (ax.bar_label), quita la cuadrícula
+=== 3eb5b64f
+dibuja 8 barras horizontales con ax.barh
+=== 7fee4010
+ordena las barras para que la categoría más grande quede arriba (orden ascendente para barh)
+=== da89b484
+pon al gráfico un título que enuncie el hallazgo (una frase completa, no 'Ingresos por categoría')
+=== 33f4747e
+etiqueta el eje x con lo que se mide y su unidad
+=== 740aba91
+añade una etiqueta de valor a cada barra con ax.bar_label(bars, fmt=...)
+=== 6aa017cd
+Entrega el análisis como un informe
+=== 0db916a5
+Los stakeholders no abren notebooks. Convierte el tuyo en una página HTML limpia, con el código oculto:
+=== a15cf292
+Antes de enviarlo, aplica la lista de comprobación que te gustaría que otro aplicara:
+=== a09c8280
+1. Las primeras líneas dan la respuesta, con cifras y en lenguaje llano.
+2. El título de cada gráfico es un hallazgo; cada tabla tiene unidades y rango de fechas.
+3. Las definiciones se dan una sola vez (qué cuenta como ingreso, como cliente activo, como reembolso).
+4. `Restart kernel and run all` funciona desde una copia limpia del repositorio, así que las cifras son reproducibles.
+5. Se enumeran las limitaciones conocidas (datos ausentes, segmentos pequeños, períodos incompletos).

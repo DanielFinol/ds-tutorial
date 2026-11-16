@@ -1,0 +1,80 @@
+=== 2f70ff9c
+Tu primer ticket
+=== 2bc1d438
+Conoce la empresa y sus datos, responde de principio a fin la pregunta de un stakeholder y prepara tu propio equipo.
+=== 541a2fe9
+Trabajar con datos
+=== 93595ff2
+Ya conoces la teoría. Este curso es la otra mitad: las herramientas, los hábitos y las trampas del trabajo diario. Cada lección es un conjunto de tareas realistas con **los datos de una misma empresa**, y el trabajo lo haces tú.
+=== 356f5494
+Cómo funcionan las lecciones:
+=== c0bed54c
+- **Las celdas de código están vivas.** Edítalas y pulsa **Ejecutar ▶** o <kbd>Shift</kbd>+<kbd>Enter</kbd>. Las celdas de una página comparten variables, como en un notebook, y las celdas anteriores se ejecutan solas si te adelantas.
+- **Los ejercicios se corrigen.** Un ✓ verde significa que tu respuesta es correcta. Cada uno tiene una pista y una solución; inténtalo antes de mirarlas.
+- **Los recuadros «En tu equipo»** cubren herramientas que no pueden ejecutarse en un navegador (git, Docker, un warehouse real). Hazlos: ahí es donde se adquiere la práctica.
+- Tus cambios y tu progreso se guardan en este navegador.
+- **El código y los datos están en inglés** (nombres de tablas y columnas, mensajes de clientes), como ocurre en la mayoría de los equipos. Las explicaciones, las pistas y las correcciones están en español.
+=== 70637dba
+## La empresa
+=== 3030307a
+Acabas de incorporarte a **Bramble**, una tienda online de artículos para el hogar con una membresía de pago, *Bramble Plus*. Las tablas del equipo de datos están disponibles a través de un pequeño módulo, `dsw`. La primera ejecución descarga Python, así que dale unos segundos.
+=== 5bf75848
+Las cuatro tablas principales forman un esquema típico de comercio: `customers` 1→N `orders` 1→N `order_items` N→1 `products`.
+=== c3b11100
+Tres cosas que comprobar en cualquier tabla nueva antes de consultarla: su **granularidad** (qué representa una fila), sus **claves** (¿son únicas?) y su **rango de fechas**.
+=== 0298f3ad
+## Un ticket resuelto
+=== 2c983d6d
+> **Priya (Marketing):** ¿Cuántos pedidos y cuántos ingresos generó cada dispositivo el pasado diciembre?
+=== 52d3ec2b
+En esa frase se esconden dos decisiones. En Bramble, *ingresos* significa solo pedidos **completados** (los cancelados y los reembolsados no aportan nada). Y «diciembre», en una columna de fecha y hora, exige un **intervalo semiabierto**: `>= "2024-12-01"` y `< "2025-01-01"`.
+=== 6ef652ed
+> **Trampa:** `order_ts <= "2024-12-31"` compara con la medianoche del *inicio* del 31 de diciembre y descarta en silencio todo ese día. Usa siempre `< primer día del período siguiente`.
+=== 58e35162
+## Tu turno
+=== 4fa190de
+> **Priya:** ¡Gracias! Para la presentación al consejo necesito el cuarto trimestre de 2024: ingresos totales y el desglose por canal de adquisición.
+=== 3561807a
+**1.** Calcula `q4_revenue`: los ingresos totales de los pedidos completados realizados en el cuarto trimestre de 2024 (de octubre a diciembre).
+=== 44e4742c
+Copia el filtro de diciembre y amplía las fechas: `>= '2024-10-01'` y `< '2025-01-01'`.
+=== b1be2b6a
+pedidos completados del cuarto trimestre de 2024
+=== 2eb3ee43
+sustituye los ... por tu código
+=== b008b517
+has perdido el 31 de diciembre: usa order_ts < '2025-01-01'
+=== fc03ef6f
+filtra status == 'completed' y 2024-10-01 <= order_ts < 2025-01-01, y luego suma total
+=== a99141d7
+**2.** El canal está en `customers`, así que hay que hacer un join. Construye `by_channel`: una fila por `channel` con las columnas `orders`, `revenue` y `aov` (valor medio del pedido), ordenada por ingresos de mayor a menor.
+=== 11e7592e
+Pasa `validate="many_to_one"` a `merge`. Hace que pandas lance un error si la clave del lado derecho no es única: es la protección más barata que existe contra las filas duplicadas en silencio.
+=== 38a0e6ac
+`groupby('channel').agg(orders=('order_id', 'count'), revenue=('total', 'sum'), aov=('total', 'mean'))` y después `sort_values`.
+=== ad19205f
+sustituye los ... por tu código
+=== 28df2c9e
+**3.** Antes de entregar nada, cuádralo. El desglose por canal tiene que sumar el total que calculaste por otro camino. Y después, la pregunta inevitable de Priya: *¿qué parte de los ingresos del cuarto trimestre vino de clientes que se registraron durante ese trimestre?* Guárdala en `new_share` (una fracción entre 0 y 1).
+=== 87abdcda
+Une `customers[['customer_id', 'signup_date']]` a `q4` y divide los ingresos de las filas con `signup_date >= '2024-10-01'` entre `q4_revenue`.
+=== 02fecc72
+¡el desglose no suma el total!
+=== 16511dd3
+new_share debe ser una fracción entre 0 y 1
+=== dcadbb95
+une signup_date a q4, suma total donde signup_date >= '2024-10-01' y divide entre q4_revenue
+=== ad735dcc
+## Envía la respuesta
+=== 54c91450
+Una buena respuesta da la cifra, la definición en la que se apoya y cualquier cosa con la que el lector pueda tropezar. Ejecuta esto para redactar la tuya a partir de las variables anteriores (el mensaje sale en inglés, el idioma de trabajo de Bramble).
+=== 6df70597
+Esa última definición importa. «Ingresos por canal» podría significar igualmente el canal que generó cada *pedido*. Cuando una petición es ambigua, elige la interpretación que puedas defender, **di cuál has elegido** y sigue adelante.
+=== 50771c6a
+Prepara tu propio entorno
+=== 6014300a
+En el trabajo de hoy, los proyectos de Python se gestionan con **uv**: instala el propio Python, resuelve las dependencias en segundos y registra las versiones exactas en un lockfile. Instálalo desde [docs.astral.sh/uv](https://docs.astral.sh/uv/) y después:
+=== d9d4b49d
+Ahora tienes `pyproject.toml` y `uv.lock` (súbelos al repositorio), una carpeta `.venv/` (no la subas nunca) y las tablas de Bramble como archivos en `data/`. En un notebook nuevo, repite la consulta del cuarto trimestre con `orders = pd.read_parquet("data/orders.parquet")` y comprueba que obtienes el mismo total que arriba.
+=== ddbeac51
+¿Prefieres VS Code? Abre la carpeta, instala las extensiones de Python y Jupyter y elige `.venv` como intérprete. Las dos opciones son habituales; usa la que use tu equipo.

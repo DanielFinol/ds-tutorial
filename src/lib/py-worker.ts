@@ -1,12 +1,13 @@
 /// <reference lib="webworker" />
 // Runs Python (Pyodide) off the main thread. One worker per page = one shared
 // namespace, so cells on a lesson page behave like notebook cells.
+import { runtime } from './i18n';
 import dswSource from './py/dsw.py?raw';
 
 export const PYODIDE_VERSION = '314.0.8';
 const PYODIDE_BASE = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
 
-type RunRequest = { id: number; code: string; check?: string };
+type RunRequest = { id: number; code: string; check?: string; lang?: 'en' | 'es' };
 export type RunResponse =
   | { id: number; type: 'status'; message: string }
   | {
@@ -105,7 +106,7 @@ async def _ds_check(src):
     try:
         await eval_code_async(src, globals())
     except AssertionError as e:
-        return str(e) or "the check did not pass yet."
+        return str(e) or ""
     except Exception as e:
         return f"{type(e).__name__}: {e}"
     return None
@@ -124,10 +125,10 @@ const IMPLIED: [RegExp, string[]][] = [
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let pyodideReady: Promise<any> | null = null;
 
-function getPyodide(post: (m: RunResponse) => void, id: number) {
+function getPyodide(post: (m: RunResponse) => void, id: number, loading: string) {
   if (!pyodideReady) {
     pyodideReady = (async () => {
-      post({ id, type: 'status', message: 'Loading Python…' });
+      post({ id, type: 'status', message: loading });
       const mod = await import(/* @vite-ignore */ `${PYODIDE_BASE}pyodide.mjs`);
       const py = await mod.loadPyodide({ indexURL: PYODIDE_BASE });
       const site = py.runPython('import site; site.getsitepackages()[0]');
@@ -141,13 +142,15 @@ function getPyodide(post: (m: RunResponse) => void, id: number) {
 
 self.onmessage = async (ev: MessageEvent<RunRequest>) => {
   const { id, code, check } = ev.data;
+  const t = runtime[ev.data.lang ?? 'en'];
   const post = (m: RunResponse) => self.postMessage(m);
   let stdout = '';
   let stderr = '';
   const fail = (error: string) =>
     post({ id, type: 'done', stdout, stderr, result: null, images: [], error, checkPassed: check ? false : null });
   try {
-    const py = await getPyodide(post, id);
+    const py = await getPyodide(post, id, t.loading);
+    py.runPython(`import os; os.environ["DSW_LANG"] = "${ev.data.lang ?? 'en'}"`); // language of dsw's feedback messages
     py.setStdout({ batched: (s: string) => (stdout += s + '\n') });
     py.setStderr({ batched: (s: string) => (stderr += s + '\n') });
     const all = check ? `${code}\n${check}` : code;
@@ -155,7 +158,7 @@ self.onmessage = async (ev: MessageEvent<RunRequest>) => {
     const implied = IMPLIED.filter(([re]) => re.test(all)).flatMap(([, pkgs]) => pkgs);
     if (implied.length) await py.loadPackage([...new Set(implied)], { messageCallback: status });
     await py.loadPackagesFromImports(all, { messageCallback: status });
-    status('Running…');
+    status(t.running);
 
     const run = py.globals.get('_ds_run');
     const raw = await run(code);
@@ -167,10 +170,10 @@ self.onmessage = async (ev: MessageEvent<RunRequest>) => {
     let checkPassed: boolean | null = null;
     if (check) {
       const checker = py.globals.get('_ds_check');
-      const problem: string | undefined = await checker(check);
+      const problem: string | null | undefined = await checker(check);
       checker.destroy();
-      checkPassed = !problem;
-      if (problem) stderr += `Not quite: ${problem}\n`;
+      checkPassed = problem === null || problem === undefined;
+      if (!checkPassed) stderr += `${t.notQuite}${problem || t.checkFailed}\n`;
     }
 
     const figs = py.globals.get('_ds_figures');

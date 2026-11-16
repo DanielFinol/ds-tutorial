@@ -1,0 +1,108 @@
+=== 6ee66666
+Ejecutar e interpretar tests A/B
+=== ddfaf85a
+Comprueba la salud de un experimento, estima el efecto con un intervalo, trata las métricas de ingresos, detecta un test roto y planifica el tamaño de muestra.
+=== 98760257
+Análisis y experimentos
+=== 3965592b
+Ya sabes lo que es un contraste de hipótesis. En el trabajo, la estadística es la parte corta. El trabajo consiste en **verificar que el experimento es válido, cuantificar el efecto en términos de negocio y dar una recomendación**. Esta lección recorre un informe de resultados completo, después un test roto y por último la planificación.
+=== ac9d7a51
+> **Marco (Producto):** El test del checkout en una sola página lleva dos semanas en marcha. ¿Ha ganado? ¿Podemos lanzarlo?
+=== 35c2c45c
+Una fila por usuario: la `variant` que se le asignó, si convirtió (`converted`, es decir, si hizo un pedido) y su `revenue` durante el test.
+=== d1ac00f5
+## Paso 1: ¿está sano el experimento?
+=== 0693645d
+Antes de mirar ningún resultado, comprueba dos cosas. Los resultados de un test que no está sano no son «más o menos correctos»: son imposibles de interpretar.
+=== 8321136b
+**Desajuste en la proporción de la muestra (SRM, sample ratio mismatch).** Con un reparto 50/50, los tamaños de los grupos solo deberían diferir por azar. Un test chi-cuadrado contra el reparto previsto detecta errores de asignación o de registro. Convención: investiga si p < 0,001.
+=== 8d5630b4
+**Equilibrio.** Las características previas al experimento deben parecerse en los dos grupos.
+=== cb50f736
+## Paso 2: el efecto sobre la conversión
+=== f9c912b8
+**1.** Calcula la tasa de conversión de cada variante y la mejora: `cr_control`, `cr_treatment`, `lift_abs` (tratamiento menos control, en puntos de proporción) y `lift_rel` (relativa al control).
+=== 74fbb9db
+`ab.groupby('variant')['converted'].mean()` da las dos tasas; indexa con `['control']` y `['treatment']`.
+=== 2eb3ee43
+sustituye los ... por tu código
+=== ffccfe82
+tasa de conversión = media de converted dentro de cada variante
+=== 89287cea
+lift_abs = cr_treatment - cr_control
+=== 1bbcd40e
+lift_rel = lift_abs / cr_control
+=== 968d689c
+**2.** Cuantifica la incertidumbre. Usa `proportions_ztest` de statsmodels para el p-valor y `confint_proportions_2indep` para un intervalo de confianza del 95 % de la **diferencia** (tratamiento menos control). Guarda `p_value`, `ci_low`, `ci_high`.
+=== 15950146
+`proportions_ztest([x_t, x_c], [n_t, n_c])` devuelve `(z, p)`. `confint_proportions_2indep(x_t, n_t, x_c, n_c)` devuelve `(low, high)` para tratamiento menos control.
+=== 27728d71
+p_value = proportions_ztest([x_t, x_c], [n_t, n_c])[1]
+=== 956656b7
+ci = confint_proportions_2indep(x_t, n_t, x_c, n_c): primero el tratamiento, para que la diferencia sea tratamiento - control
+=== 3ddbd06b
+Empieza por el intervalo, no por el p-valor. «La conversión subió entre 0,9 y 2,1 puntos» le dice a Marco cómo de grande es, de forma plausible, la ganancia; «p < 0,001» solo le dice que no es cero.
+=== 1fc14423
+## Paso 3: ingresos por usuario
+=== 06017f20
+La conversión no es dinero. La métrica de decisión suele ser los **ingresos por usuario**, que son casi todo ceros con una cola larga a la derecha. Con decenas de miles de usuarios por grupo, un test t de Welch sobre las medias sigue siendo válido; un **bootstrap** no hace supuestos sobre la distribución y te da un intervalo para cualquier estadístico.
+=== 4c4529d8
+**3.** Calcula por bootstrap un intervalo de confianza del 95 % para la diferencia en ingresos medios por usuario. Extrae 2.000 remuestras de cada grupo **con reemplazo** (del mismo tamaño que el grupo), calcula en cada una la diferencia de medias y toma los percentiles 2,5 y 97,5. Guárdalos en `boot_low` y `boot_high`.
+=== c0cb69b3
+Dentro del bucle: `diffs[b] = rng.choice(rev_t, len(rev_t), replace=True).mean() - rng.choice(rev_c, len(rev_c), replace=True).mean()`. Después, `np.percentile(diffs, [2.5, 97.5])`.
+=== 1f4192ee
+remuestrea cada grupo con rng.choice(..., size=len(grupo), replace=True) y guarda la diferencia de medias
+=== 227f599f
+el intervalo debe contener la diferencia observada
+=== b389fa01
+el intervalo no es correcto: remuestrea cada grupo a su tamaño completo y con reemplazo, 2.000 veces, y después np.percentile(diffs, [2.5, 97.5])
+=== 49d01b8a
+## Paso 4: segmentos, con cuidado
+=== 0d9a9889
+Marco preguntará «¿funciona en todas partes?». Mira, pero corta por **pocos segmentos y acordados de antemano**. Si cortas por veinte, uno parecerá significativo solo por azar.
+=== 36d4b670
+La ganancia viene de **mobile**; en desktop el intervalo incluye el cero con holgura. Una conclusión defendible: *lanzarlo; la ganancia está en mobile y no hay evidencia de perjuicio en desktop.*
+=== 7f87a95c
+## Un test que no debes leer
+=== 08218c2b
+> **Marco:** Ya que estás: el test del banner de envío gratis también terminó. ¡El dashboard dice que el tratamiento convierte mejor, p = 0,02!
+=== eb309e06
+**4.** Haz primero la comprobación de salud. Calcula `srm_p`, el p-valor de SRM de `ship` frente a un reparto 50/50. Después averigua qué `browser` es el responsable: guarda su nombre en `culprit`.
+=== 7691c5da
+`stats.chisquare(ship['variant'].value_counts(), f_exp=[len(ship) / 2] * 2).pvalue`. En la tabla dinámica, un navegador tiene alrededor de un 30 % menos de usuarios en tratamiento.
+=== 7b8c8c67
+compara el tamaño de los grupos por navegador para ver dónde se perdieron usuarios
+=== 0716674f
+srm_p = stats.chisquare(counts, f_exp=[len(ship) / 2] * 2).pvalue
+=== b8941c02
+mira los conteos por navegador: uno tiene muchos menos usuarios en tratamiento que en control
+=== e63a884e
+El tratamiento perdió a un tercio de sus usuarios de Safari antes de que quedaran registrados, y los usuarios de Safari son los que peor convierten. La «mejora» la produce por completo quién falta. La conclusión correcta es: **no válido; arreglar el tracking y repetir**. Informar del 0,02 sería el error; detectarlo es el trabajo.
+=== 0355ad4b
+## Planificación: ¿cuánto debe durar un test?
+=== 8c703b78
+Antes de que empiece un test te preguntarán cuánto tiempo necesita. Para eso hacen falta la tasa de partida, el **efecto mínimo detectable** (la mejora más pequeña por la que merece la pena actuar, que es una decisión de negocio), el nivel de significación y la potencia.
+=== c80f8215
+Reducir a la mitad el efecto detectable multiplica por cuatro la muestra. Ese equilibrio es la conversación que hay que tener con el responsable de producto *antes* del lanzamiento.
+=== df023d51
+**5.** El siguiente test se centra en la página del carrito: conversión de partida del 6 %, y al equipo le interesa una mejora absoluta de 0,6 puntos o más. La página recibe 2.500 usuarios elegibles al día, repartidos 50/50. Calcula `n_per_arm` (con la función de arriba y los valores por defecto de alfa y potencia) y `days_needed` (días enteros, redondeando hacia arriba).
+=== 16b0388b
+`users_per_arm(0.06, 0.006)`; los dos grupos juntos necesitan `2 * n_per_arm` usuarios a 2.500 por día: `int(np.ceil(2 * n_per_arm / 2500))`.
+=== 144eeea1
+n_per_arm = users_per_arm(0.06, 0.006); se esperaba {_n:,}
+=== 42f90e34
+days_needed = ceil(usuarios totales de los dos grupos / 2.500 por día)
+=== d7959fe1
+Redondea la duración a **semanas completas** para que todos los días de la semana estén representados por igual, y fíjala de antemano.
+=== 4ca9011f
+## Por qué no se para antes de tiempo
+=== 144d9706
+Mirar el p-valor cada día y parar en el primer p < 0,05 infla los falsos positivos. Esto simula 1.000 tests A/A (sin diferencia real) con un vistazo diario:
+=== dab73414
+Si el negocio necesita poder parar antes, usa un método diseñado para ello (límites secuenciales por grupos o p-valores siempre válidos, que ofrecen la mayoría de las plataformas de experimentación), no tests ordinarios repetidos.
+=== ae49674c
+Escribe el informe de resultados
+=== ab96eaa8
+El entregable de un test A/B es un documento de media página. Escribe con tus palabras el del test del checkout, con esta estructura, y limítate a quince minutos:
+=== a4056f20
+Después compáralo con el de un compañero, o pídele a un asistente de IA que lo critique como lo haría un director de producto escéptico.

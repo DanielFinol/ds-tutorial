@@ -24,6 +24,7 @@ test('PWA manifest, service worker and data module are served', async ({ page, r
   expect(manifest.short_name).toBe('DS at Work');
   const sw = await (await request.get('sw.js')).text();
   expect(sw).toContain('lessons/01-first-ticket/');
+  expect(sw).toContain('es/lessons/01-first-ticket/');
   expect(await (await request.get('dsw.py')).text()).toContain('def churn_snapshot');
 });
 
@@ -39,4 +40,22 @@ test('lessons work offline once the service worker is installed', async ({ page,
   await page.goto('lessons/07-ab-testing/'); // never visited: must come from the pre-cache
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Running and reading A/B tests');
   await context.setOffline(false);
+});
+
+test('Spanish version: home, language switch and lesson pages', async ({ page }) => {
+  await page.goto('es/');
+  await expect(page.locator('html')).toHaveAttribute('lang', 'es');
+  await expect(page.getByRole('heading', { level: 1, name: 'Ciencia de datos en el trabajo' })).toBeVisible();
+  await expect(page.locator('a.lesson-card')).toHaveCount(15);
+  await page.getByRole('link', { name: 'Empezar' }).click();
+  await expect(page).toHaveURL(/es\/lessons\/01-first-ticket\/$/);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Tu primer ticket');
+  await expect(page.getByRole('button', { name: 'Ejecutar ▶' }).first()).toBeVisible();
+
+  // the switcher leads to the same lesson in the other language, and back
+  await page.getByRole('link', { name: 'English' }).click();
+  await expect(page).toHaveURL(/\/ds-tutorial\/lessons\/01-first-ticket\/$/);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Your first ticket');
+  await page.getByRole('link', { name: 'Español' }).click();
+  await expect(page).toHaveURL(/es\/lessons\/01-first-ticket\/$/);
 });

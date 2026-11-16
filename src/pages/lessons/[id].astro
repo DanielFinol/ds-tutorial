@@ -1,50 +1,16 @@
 ---
-import { render } from 'astro:content';
-import Base from '../../layouts/Base.astro';
-import { getLessons } from '../../lib/lessons';
-import { url } from '../../lib/paths';
+import LessonPage from '../../components/LessonPage.astro';
+import { getLessons, slugOf } from '../../lib/lessons';
 
 export async function getStaticPaths() {
-  const lessons = (await getLessons()).filter((l) => l.data.status === 'ready');
+  const lessons = await getLessons('en');
   return lessons.map((lesson, i) => ({
-    params: { id: lesson.id },
+    params: { id: slugOf(lesson) },
     props: { lesson, prev: lessons[i - 1], next: lessons[i + 1] },
   }));
 }
 
 const { lesson, prev, next } = Astro.props;
-const { Content } = await render(lesson);
 ---
 
-<Base title={lesson.data.title} description={lesson.data.description} lesson={lesson.id}>
-  <p class="lesson-meta">{lesson.data.module} · Lesson {lesson.data.order} · {lesson.data.minutes} min · {lesson.data.tools.join(', ')}</p>
-  <h1>{lesson.data.title}</h1>
-  <p class="lede">{lesson.data.description}</p>
-
-  <article>
-    <Content />
-  </article>
-
-  <div class="lesson-footer">
-    <span>{prev && <a href={url(`lessons/${prev.id}/`)}>← {prev.data.title}</a>}</span>
-    <button type="button" class="btn-ghost" data-complete={lesson.id}>Mark as complete</button>
-    <span>{next ? <a href={url(`lessons/${next.id}/`)}>{next.data.title} →</a> : <a href={url()}>All lessons</a>}</span>
-  </div>
-</Base>
-
-<script>
-  import { getCompleted, setCompleted } from '../../lib/progress';
-  const btn = document.querySelector<HTMLButtonElement>('[data-complete]')!;
-  const id = btn.dataset.complete!;
-  const paint = () => {
-    const done = getCompleted().has(id);
-    btn.textContent = done ? '✓ Completed' : 'Mark as complete';
-    btn.setAttribute('aria-pressed', String(done));
-  };
-  btn.addEventListener('click', () => {
-    setCompleted(id, !getCompleted().has(id));
-    paint();
-  });
-  document.addEventListener('dsw:progress', paint);
-  paint();
-</script>
+<LessonPage lang="en" lesson={lesson} prev={prev} next={next} />

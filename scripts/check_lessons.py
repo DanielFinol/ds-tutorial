@@ -4,7 +4,7 @@ Runs every <PyCell> of the given lessons in order in one namespace:
   - plain cells must not raise;
   - exercise starter code must NOT pass its check; the solution MUST.
 
-    python scripts/check_lessons.py [-v] [lesson-id ...]
+    python scripts/check_lessons.py [-v] [lesson-id ...]     e.g. 07, es/07, es
 
 Needs a Python env with the lesson packages (pandas, duckdb, polars, scikit-learn, ...).
 """
@@ -43,8 +43,10 @@ def run(code: str, ns: dict, lang="python"):
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     verbose = "-v" in sys.argv
-    files = sorted((ROOT / "src/content/lessons").glob("*.mdx"))
-    files = [f for f in files if not args or any(f.stem.startswith(a) for a in args)]
+    base = ROOT / "src/content/lessons"
+    files = sorted(base.glob("*.mdx")) + sorted(base.glob("*/*.mdx"))  # translations live in subfolders (es/...)
+    rel = lambda f: f.relative_to(base).with_suffix("").as_posix()
+    files = [f for f in files if not args or any(rel(f).startswith(a) for a in args)]
     failures = 0
     for f in files:
         ns = {"__name__": "__main__"}
@@ -82,7 +84,7 @@ def main():
             except Exception:
                 failures += 1
                 status = "FAIL\n" + traceback.format_exc(limit=-3)
-            print(f"{f.stem} cell {i:2d} [{time.time() - t0:5.2f}s] {status}")
+            print(f"{rel(f)} cell {i:2d} [{time.time() - t0:5.2f}s] {status}")
             if verbose and buf.getvalue():
                 print("    " + buf.getvalue().rstrip()[:1200].replace("\n", "\n    "))
         try:

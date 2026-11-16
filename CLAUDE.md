@@ -7,7 +7,7 @@
 - `pnpm build`: `astro check` + build to `dist/` (must pass before committing)
 - `pnpm test:e2e`: Playwright against `astro preview`; run `pnpm build` first. Needs network access to cdn.jsdelivr.net.
 - `pnpm exec playwright test lessons -g "07-" --project=desktop --trace off`: one lesson in the browser
-- `python scripts/check_lessons.py -v 07`: fast native check of lesson code (needs a Python env with the lesson packages)
+- `python scripts/check_lessons.py -v 07`: fast native check of lesson code (`es/07` or `es` for Spanish; needs a Python env with the lesson packages)
 
 ## Layout
 - `src/content/lessons/*.mdx`: lessons (frontmatter schema in `src/content.config.ts`; quote string values)
@@ -26,6 +26,13 @@
 - In MDX, code goes in JS template literals: escape backslashes (`\\n`), backticks and `${` (write `\${`).
 - Always build internal links with `url()` from `src/lib/paths.ts`.
 - Colours are CSS custom properties in `src/styles/global.css` with light and dark values.
+
+## Translations (English + Spanish)
+- English lessons in `src/content/lessons/*.mdx` are the single source for code. Never edit `src/content/lessons/es/` (generated, git-ignored).
+- Spanish text lives in `i18n/es/<lesson>.txt`, keyed by a hash of the English segment. `scripts/i18n.mjs` (run by `pnpm dev`/`build`) generates the Spanish lessons and fails if a segment is untranslated or a key is stale.
+- After changing English prose, hints, assert messages or code comments: run `node scripts/i18n.mjs`, then add or update the listed keys in `i18n/es/`. Keep f-string placeholders (`{...}`) and escapes exactly as in the English segment; hints must not contain double quotes.
+- Interface strings: `src/lib/i18n.ts`. `dsw.same` feedback: `_t()` in `dsw.py` (language comes from `DSW_LANG`, set by the worker).
+- Spanish style: neutral international Spanish, informal "tú"; keep code, data and standard technical terms (pipeline, join, dashboard, churn) in English.
 
 ## Pyodide limits (verified)
 - 32-bit: `np.repeat` counts and similar need `np.intp`.

@@ -1,0 +1,156 @@
+=== 7e2d023c
+Limpiar una exportación desordenada
+=== 1d551eef
+Convierte un CSV del mundo real (duplicados, formatos de fecha mezclados, importes como texto, etiquetas inconsistentes) en una tabla de la que puedas fiarte, y escribe las comprobaciones que la mantienen así.
+=== 541a2fe9
+Trabajar con datos
+=== 7abd9e06
+Las tablas del warehouse son el caso fácil. Tarde o temprano alguien te manda por correo una exportación de una hoja de cálculo y te pide cifras para el viernes. Esta lección es uno de esos archivos, limpiado paso a paso. La habilidad está en el orden de las operaciones: **mirar, arreglar la estructura, arreglar los valores, validar, documentar**.
+=== 016be7d9
+Escribirás cada paso como una función pequeña que recibe un DataFrame y devuelve uno nuevo. Así cada paso se puede probar y volver a ejecutar, y al final los pasos se encadenan en un único pipeline.
+=== 723b6683
+> **Dana (Operaciones):** Te adjunto la exportación de pedidos del sistema de logística del segundo semestre de 2024. ¿Puedes cotejarla con las cifras de finanzas?
+=== fbf8fb40
+## Mira antes de tocar
+=== e369d50a
+Nunca empieces a arreglar sin haber perfilado antes. `dtypes` te dice qué no se pudo interpretar (todo lo que debería ser número o fecha y aparece como texto) y `value_counts` deja a la vista las etiquetas inconsistentes.
+=== 9deeaf1c
+Ya se ve: espacios sobrantes en los nombres de las columnas, todas las columnas salvo los identificadores leídas como texto, estados con mayúsculas y espacios mezclados y un `"N/A"` literal, y cinco países escritos de quince maneras.
+=== 245d4b8f
+## 1. Nombres de columnas
+=== c31bfa4c
+**1.** Completa `clean_columns` para que las columnas sean exactamente `order_id`, `customer_id`, `order_date`, `status`, `country`, `discount_pct`, `total`.
+=== 6a40d006
+Encadena métodos de texto: `.str.strip().str.lower().str.replace('%', 'pct').str.replace(' ', '_')`.
+=== 1d0b5927
+amplía esta cadena
+=== d4713025
+se obtuvo {list(_o.columns)}
+=== 14dbc0a8
+devuelve una copia renombrada; no modifiques raw
+=== a7a42fda
+## 2. Filas que no deberían estar
+=== 044d89d0
+Las exportaciones suelen ser la concatenación de varias descargas, así que los duplicados exactos son frecuentes. Y los sistemas operativos contienen registros de prueba. Aquí, los pedidos de QA están asignados al `customer_id` 0.
+=== fa10a8b4
+**2.** Completa `drop_bad_rows`: elimina las filas duplicadas exactas y los pedidos de QA. Después, `order_id` debe ser único.
+=== c33ea40d
+`df.drop_duplicates()` y después conserva las filas con `customer_id != 0`. Añade `.reset_index(drop=True)` para dejar el índice ordenado.
+=== fe6df460
+sustitúyelo por la tabla filtrada
+=== cfbcdc43
+siguen presentes los pedidos de QA (customer_id == 0)
+=== ddeffed1
+order_id sigue teniendo duplicados: usa drop_duplicates()
+=== af64360b
+se esperaban 2000 filas tras la limpieza y hay {len(_o)}
+=== a108a15c
+> Eliminar duplicados *exactos* es seguro. Si hubiera filas con el mismo `order_id` pero diferencias en otras columnas, tendrías un conflicto real que investigar y plantear al responsable de los datos, no algo que «arreglar» con `keep="first"`.
+=== cb23c142
+## 3. Texto categórico
+=== ff3d92de
+**3.** Completa `clean_labels`. Para `status`: quita los espacios, pasa a minúsculas y convierte `"n/a"` en un valor ausente de verdad. Para `country`: asigna cada forma de escribirlo a uno de los cinco códigos `US`, `UK`, `DE`, `FR`, `CA`.
+=== 0768f019
+Escribe el mapeo de países de forma explícita. Un mapeo explícito deja como ausentes las grafías desconocidas, así que falla de forma visible cuando aparece una nueva el mes que viene; una coincidencia aproximada «inteligente» falla en silencio.
+=== b6f057b8
+`df['status'].str.strip().str.lower().replace('n/a', pd.NA)`. Para listar todas las grafías de país: `step2['country'].str.strip().str.lower().unique()`. GB y United Kingdom son UK.
+=== f53e4ad8
+completa el mapeo: las claves son las grafías en minúsculas y sin espacios
+=== 41672fee
+df["status"] = ...
+=== ff938e7a
+status solo debe contener completed/cancelled/refunded (más los ausentes), y contiene {sorted(_s.unique())[:6]}
+=== df22da38
+se esperaban 30 estados ausentes (las filas N/A) y hay {_o['status'].isna().sum()}
+=== 30b3181a
+{int(_o['country'].isna().sum())} filas tienen un país sin mapear: completa COUNTRY_MAP
+=== 914858eb
+algunos países están asignados al código equivocado
+=== ef384f00
+## 4. Números guardados como texto
+=== 6a3a13b5
+**4.** Completa `parse_numbers`: `discount_pct` pasa a enteros y `total` a decimales. Quita los símbolos de moneda, los separadores de miles y el sufijo `USD`; las celdas vacías siguen ausentes. Usa `pd.to_numeric(..., errors="raise")` para que cualquier cosa que no hayas previsto te detenga.
+=== 26531e3c
+`df['discount_pct'].str.rstrip('%').astype(int)`. Para total: `.str.replace(r'[$,]|USD', '', regex=True).str.strip()` y después `pd.to_numeric`. `read_csv` ya leyó las celdas vacías como ausentes.
+=== ec58933c
+df["discount_pct"] = ...
+=== 9c688036
+df["total"] = ...
+=== 9513d557
+discount_pct debe ser una columna de enteros
+=== baf2efab
+discount_pct debe contener 0, 10, 20 o 30
+=== b6cd603f
+total debe ser una columna de decimales (float)
+=== 6e0a838d
+los totales vacíos deben seguir ausentes: se esperaban 25 ausentes y hay {_o['total'].isna().sum()}
+=== b8197f48
+los valores parecen alterados: en este paso solo interpreta el texto
+=== 7dacc097
+## 5. Valores inverosímiles
+=== 31efc45f
+El resumen muestra un máximo muy por encima del percentil 75. Mira los extremos antes de decidir nada.
+=== 685c4334
+Seis pedidos son unas cien veces más grandes de lo normal y no tienen parte decimal: se registraron en **céntimos**. Es un error de unidades que se puede corregir, no un valor atípico que haya que borrar. Lo confirmas con Dana y lo corriges con una regla que puedas enunciar en una frase.
+=== a483f326
+**5.** Completa `fix_cents`: divide `total` entre 100 cuando supere 3.000 (muy por encima de cualquier pedido real de aquí) y registra qué filas has cambiado en una columna booleana `total_was_cents`.
+=== 849be198
+`df['total_was_cents'] = df['total'] > 3000` y después `df.loc[df['total_was_cents'], 'total'] /= 100`.
+=== d0a5e920
+marca las filas afectadas y corrígelas con .loc
+=== 7bc3c3ff
+total_was_cents debe ser una columna booleana
+=== af874941
+se esperaban 6 filas marcadas y hay {_o['total_was_cents'].sum()}
+=== f5d1365c
+{(~_ok).sum()} totales siguen sin coincidir con el sistema de origen; p. ej. el pedido {_o.loc[~_ok, 'order_id'].iloc[0]}
+=== b0aeabfd
+## 6. Fechas en tres formatos
+=== 296ffadf
+Dejar que un parser adivine es la forma de que el 5 de marzo se convierta en el 3 de mayo. `22/12/2024` no es ambiguo, `05/03/2024` sí, y un parser que adivina elegirá tranquilamente una lectura distinta en cada fila. Interpreta cada formato conocido **de forma explícita** y combina los resultados.
+=== 0d916091
+**6.** Completa `parse_dates` para que `order_date` sea una columna de fechas de verdad, sin ningún valor ausente. Los tres formatos son `%Y-%m-%d %H:%M:%S`, `%d/%m/%Y %H:%M` y `%b %d, %Y`.
+=== c782459f
+`dmy = pd.to_datetime(df['order_date'], format='%d/%m/%Y %H:%M', errors='coerce')`, lo mismo para `'%b %d, %Y'`, y después `iso.fillna(dmy).fillna(text)`.
+=== c75176a0
+interpreta los otros dos formatos de la misma manera y combínalos con .fillna(...)
+=== ed9def14
+order_date debe ser una columna de fechas (datetime)
+=== e19303ca
+{_o['order_date'].isna().sum()} fechas no se pudieron interpretar
+=== 0ddef3f6
+{_bad.sum()} fechas son incorrectas (¿día y mes intercambiados?); p. ej. el pedido {_o.loc[_bad, 'order_id'].iloc[0]}
+=== 7bd26108
+## 7. Un solo pipeline y comprobaciones permanentes
+=== c5333bee
+Las seis funciones se encadenan en un pipeline que puedes volver a ejecutar con el archivo del mes que viene:
+=== 4e6edac2
+Todo lo que has verificado a ojo debería ser también código, para que la exportación del mes que viene se compruebe en un segundo. En el trabajo esto es un **contrato de datos**: reglas que la tabla debe cumplir y que se ejecutan automáticamente (con herramientas como pandera, Great Expectations o los tests de dbt). La idea central cabe en una función.
+=== 8d0a429c
+**7.** Completa `validate_orders(df)`, que devuelve una **lista con la descripción de los problemas** (una lista vacía significa que la tabla es válida). Debe detectar como mínimo: `order_id` duplicados, pedidos de QA (`customer_id` 0), estados distintos de `completed`/`cancelled`/`refunded` (se permite ausente) y totales iguales a cero o negativos (se permite ausente).
+=== 306aca4d
+Para cada regla, construye una máscara booleana de filas incorrectas y añade un mensaje si `mask.any()`. Estados: `~df['status'].isin([...]) & df['status'].notna()`. Totales: `pd.to_numeric(df['total'], errors='coerce') <= 0`.
+=== 8fbc4738
+añade las demás reglas
+=== 5dcd5cc3
+la tabla limpia debería pasar, y devuelve {validate_orders(_c)}
+=== aeddc8b7
+no se detectó un pedido de QA (customer_id == 0)
+=== 55a5c0f5
+no se detectó un estado desconocido ('shipped')
+=== a01d936c
+no se detectó un total negativo
+=== 0028c09e
+no se detectó un order_id duplicado
+=== eaa1c3dd
+la exportación original debería incumplir al menos tres reglas
+=== 5ac587fb
+## 8. Cuadra y documenta
+=== 3ffd65bb
+La limpieza termina cuando el resultado coincide con una fuente independiente y has dejado por escrito lo que hiciste. Los valores ausentes que queden **se comunican, no se inventan**: no rellenas 25 totales vacíos con la media para llamarlo ingresos.
+=== 989f0d72
+Convierte las comprobaciones en un esquema
+=== 73cc609e
+En tu proyecto, declara las mismas reglas con **pandera**, la librería de validación más habitual para DataFrames:
+=== 59c089fd
+Después rompe los datos a propósito (pon un estado en `"shipped"`) y lee el informe de errores. Pon el esquema en un módulo, llama a `validate` al principio de cada pipeline que lea este archivo y los datos incorrectos se quedarán en la puerta.

@@ -1,0 +1,98 @@
+=== 83fc612d
+Regresión para preguntas de negocio
+=== 25923417
+Usa statsmodels para responder «¿cuánto, a igualdad de todo lo demás?»: diferencias ajustadas, efectos porcentuales, odds ratios, efectos marginales e interacciones.
+=== 98760257
+Análisis y experimentos
+=== 63bc5562
+La mayoría de las preguntas no se pueden someter a un test A/B: no puedes asignar al azar la membresía ni una entrega defectuosa. La herramienta cotidiana para «cuánto importa X, a igualdad de lo demás» es una regresión que se pueda **leer**, no un modelo de caja negra. En Python eso significa **statsmodels** con su interfaz de fórmulas.
+=== 9fc3d131
+La tabla tiene una fila por cliente activo recientemente, a fecha de 1 de julio de 2024, con la indicación de si abandonó (`churned`: no hizo ningún pedido en los 90 días siguientes).
+=== ea9cfd02
+## ¿Cuánto más gastan los miembros?
+=== 7de6a2bc
+> **Finanzas:** Para el caso de negocio de la membresía: ¿cuánto más gasta al año un miembro Plus que un no miembro?
+=== a23dc363
+La comparación en bruto es una línea, y es la respuesta equivocada: los miembros también difieren en antigüedad, canal y dispositivo, y todo ello afecta al gasto.
+=== 4fa14620
+Una fórmula nombra el resultado a la izquierda y los predictores a la derecha. `C(...)` marca una variable categórica. El gasto es asimétrico y su varianza crece con su nivel, así que pide **errores estándar robustos** (`cov_type="HC3"`); conviértelo en tu opción por defecto para datos de negocio.
+=== 85615ee9
+Cómo leer una fila: *a igual antigüedad, los miembros gastan aproximadamente esa cantidad de dólares más al año*, con el intervalo del 95 % en las dos últimas columnas.
+=== 00eaf852
+**1.** Ajusta `m1`, que además ajusta por `channel` de adquisición y `device` (ambos categóricos), con errores HC3. Extrae el coeficiente de la membresía en `plus_coef` y su intervalo del 95 % en `plus_low`, `plus_high`.
+=== 5e8171e9
+`smf.ols('spend_365d ~ plus_member + tenure_days + C(channel) + C(device)', data=cust).fit(cov_type='HC3')`. Los nombres de los coeficientes están en `m1.params.index`; el de la membresía es `'plus_member[T.True]'`.
+=== 2eb3ee43
+sustituye los ... por tu código
+=== 2dea4e47
+plus_coef = m1.params['plus_member[T.True]'] de spend_365d ~ plus_member + tenure_days + C(channel) + C(device)
+=== 313c3402
+intervalo = m1.conf_int().loc['plus_member[T.True]'] con cov_type='HC3'
+=== 5556c67e
+La cifra ajustada queda muy por debajo de la diferencia en bruto: parte de esa diferencia se debía simplemente a que los miembros llevan más tiempo siendo clientes.
+=== 63156d65
+## Efectos porcentuales con el resultado en logaritmos
+=== f52f62ec
+Finanzas suele pensar en porcentajes, y las variables monetarias asimétricas se comportan mejor en escala logarítmica. Con `np.log1p(y)` como resultado, un coeficiente `b` significa que el resultado se multiplica por `exp(b)`: un cambio de `exp(b) - 1` en términos porcentuales.
+=== 56326900
+**2.** Ajusta `m2`: los mismos predictores que `m1`, resultado `np.log1p(spend_365d)`, errores HC3. Guarda el efecto de la membresía como proporción en `plus_pct` (por ejemplo, 0.25 para +25 %).
+=== d35e76f9
+Las fórmulas aceptan funciones: `'np.log1p(spend_365d) ~ plus_member + tenure_days + C(channel) + C(device)'`. Después, `np.exp(coef) - 1`.
+=== 80a6a173
+ese es el coeficiente logarítmico sin transformar: conviértelo con np.exp(b) - 1
+=== 8f80a69c
+plus_pct = np.exp(m2.params['plus_member[T.True]']) - 1
+=== a4f964fc
+> **Lo que puedes afirmar y lo que no.** «Los miembros gastan aproximadamente esa cantidad más que los no miembros comparables» está respaldado. «La membresía *causa* ese gasto» no lo está: se hicieron miembros los clientes que ya esperaban comprar mucho. La regresión solo ajusta por lo que está en el modelo. Dilo en el informe y propón un experimento (una prueba con descuento ofrecida al azar) si la cifra causal importa.
+=== bb69748e
+## Resultados binarios: regresión logística
+=== bf340b0d
+> **Experiencia de Cliente:** ¿Cuánto aumenta una mala experiencia con soporte (un ticket por pedido tardío, dañado o reembolsado) la probabilidad de que un cliente abandone?
+=== 827819cb
+Para un resultado de sí o no, usa `smf.logit`. Los coeficientes están en log-odds; `np.exp` los convierte en **odds ratios**.
+=== 3ed20353
+**3.** Construye `odds`: un DataFrame indexado por el nombre del coeficiente con las columnas `odds_ratio`, `low` y `high` (el coeficiente exponenciado y su intervalo del 95 %), para el modelo `logit` de arriba.
+=== d7fbd31c
+`ci = logit.conf_int()` tiene las columnas 0 y 1. `np.exp(pd.DataFrame({'odds_ratio': logit.params, 'low': ci[0], 'high': ci[1]}))`.
+=== 2aa27b10
+odds debe ser un DataFrame
+=== caaf2a1d
+las columnas deben incluir odds_ratio, low, high; y son {list(odds.columns)}
+=== 6a4ae466
+exponencia logit.params y logit.conf_int()
+=== 816104fc
+Los odds ratios son difíciles de explicar en una reunión («odds un 23 % mayores» *no* es «un 23 % más probable»). Los **efectos marginales medios** traducen cada coeficiente a puntos porcentuales de probabilidad, que es lo que de verdad quieren los stakeholders:
+=== 220d79c5
+Una frase para el equipo de CX: *los clientes con un ticket de mala experiencia tienen unos cuatro puntos más de probabilidad de abandonar que clientes comparables sin él; el intervalo va aproximadamente de cero a ocho puntos, así que el efecto es real pero no se conoce con precisión.* (Compáralo con la diferencia en bruto que imprimiste arriba: dos puntos. El ajuste la movió, como ocurre a menudo.)
+=== d3ad9304
+## ¿Cambia el efecto según el grupo? Interacciones
+=== b1847ed2
+CX sospecha que una mala experiencia perjudica más a los **no miembros** que a los miembros. Eso es una interacción: en una fórmula, `a * b` se expande a `a + b + a:b`.
+=== dc9e2199
+Los coeficientes de interacción son casi imposibles de leer directamente. **Predice para perfiles concretos.**
+=== 4fba9e41
+**4.** Construye `profiles`: cuatro filas con todas las combinaciones de `had_bad_ticket` y `plus_member` (en el orden False/False, True/False, False/True, True/True), con `recency_days` y `orders_365d` fijados en sus medianas en `cust`. Añade una columna `p_churn` con la probabilidad de abandono que predice el modelo.
+=== 21ad58d8
+Añade `'recency_days': cust['recency_days'].median()` y `'orders_365d': cust['orders_365d'].median()` al diccionario (los escalares se propagan a todas las filas) y después `inter.predict(profiles)`.
+=== 867fecb7
+añade recency_days y orders_365d en sus medianas
+=== 3b39989a
+profiles necesita 4 filas y una columna p_churn
+=== 64d9831e
+sustituye los ... por inter.predict(profiles)
+=== 96e32d1d
+p_churn = inter.predict(profiles) con recency_days y orders_365d en las medianas de cust
+=== 62717f26
+Para los no miembros, el ticket de mala experiencia sube varios puntos el abandono previsto; para los miembros apenas se mueve. Pero vuelve a mirar la fila de la interacción en el resumen: su intervalo es amplio e incluye el cero. Con solo unos 150 miembros con un ticket de mala experiencia, la afirmación honesta es *«los datos son compatibles con que los miembros sean más resistentes, pero todavía no podemos confirmarlo»*. Decir eso con claridad vale más que una respuesta rotunda y equivocada.
+=== f4e90ee5
+## Tres comprobaciones antes de enviar un coeficiente
+=== aae009f4
+Los pedidos y el gasto en la misma ventana contienen casi la misma información, así que no pongas ambos en un modelo cuyos coeficientes pretendas interpretar.
+=== 9f6afee2
+Presenta una regresión a personas sin formación estadística
+=== 8db1d5ca
+Toma el modelo `m1` y escribe el resumen de tres líneas que necesita Finanzas. Sin tablas de coeficientes; una frase por línea:
+=== 40e32186
+Después haz el único gráfico que lo respalda: un gráfico de coeficientes.
+=== e0b887c9
+`tenure_days` parecerá cero al lado de los demás porque su unidad es un día. Pásalo a años en la fórmula (`I(tenure_days / 365)`) y vuelve a dibujarlo. Las unidades son la causa más frecuente de que un gráfico de coeficientes engañe.
