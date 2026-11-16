@@ -3,7 +3,7 @@ import { defineConfig, devices } from '@playwright/test';
 // Tests run against the production build (`pnpm build` first), served by `astro preview`.
 export default defineConfig({
   testDir: 'tests/e2e',
-  timeout: 120_000, // first Python run downloads Pyodide + packages
+  timeout: 180_000, // first Python run downloads Pyodide + packages
   expect: { timeout: 90_000 },
   fullyParallel: true,
   forbidOnly: !!process.env.CI,

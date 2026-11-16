@@ -3,7 +3,7 @@
   "type": "module",
   "version": "0.1.0",
   "private": true,
-  "description": "An interactive, in-browser tutorial on doing Data Science in 2026.",
+  "description": "Data Science at Work: an interactive, exercise-driven tutorial that runs in the browser.",
   "packageManager": "pnpm@10.28.0",
   "engines": {
     "node": ">=22.23.4"
@@ -17,7 +17,15 @@
   },
   "dependencies": {
     "@astrojs/mdx": "8.1.6",
-    "astro": "7.4.12"
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@lezer/highlight": "^1.2.5",
+    "astro": "7.4.12",
+    "codemirror": "^6.0.2"
   },
   "devDependencies": {
     "@astrojs/check": "0.9.12",

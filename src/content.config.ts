@@ -10,7 +10,8 @@ const lessons = defineCollection({
     module: z.string(),
     order: z.number(),
     minutes: z.number(),
-    status: z.enum(['ready', 'draft']).default('draft'),
+    tools: z.array(z.string()),
+    status: z.enum(['ready', 'draft']).default('ready'),
   }),
 });
 

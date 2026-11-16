@@ -1,0 +1,413 @@
+---
+title: "Cleaning a messy export"
+description: "Turn a real-world CSV (duplicates, mixed date formats, money as text, inconsistent labels) into a table you can trust, and write the checks that keep it that way."
+module: "Working with data"
+order: 4
+minutes: 40
+tools: ["pandas", "data validation"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+Warehouse tables are the easy case. Sooner or later someone emails you a spreadsheet export and asks for numbers by Friday. This lesson is one such file, cleaned step by step. The order of operations is the skill: **look, fix structure, fix values, validate, document**.
+
+You'll write each step as a small function that takes a DataFrame and returns a new one. That keeps every step testable and re-runnable, and at the end the steps chain into one pipeline.
+
+> **Dana (Operations):** Attached is the orders export from the fulfilment system for the second half of 2024. Can you check it against finance's numbers?
+
+<PyCell code={`
+import dsw
+import pandas as pd
+
+dsw.export("data")
+raw = pd.read_csv("data/raw/orders_export.csv")
+print(raw.shape)
+raw.head(8)
+`} />
+
+## Look before you touch
+
+Never start fixing before you've profiled. `dtypes` tells you what failed to parse (anything that should be a number or date but shows as text), and `value_counts` exposes inconsistent labels.
+
+<PyCell code={`
+print(raw.dtypes, "\\n")
+print(list(raw.columns), "\\n")
+print(raw[" Status"].value_counts(dropna=False).head(12), "\\n")
+print(raw["Country"].value_counts().head(20))
+`} />
+
+Already visible: stray spaces in column names, every column except the IDs read as text, statuses in mixed case with padding and a literal `"N/A"`, and five countries spelled fifteen ways.
+
+## 1. Column names
+
+**1.** Complete `clean_columns` so the columns are exactly `order_id`, `customer_id`, `order_date`, `status`, `country`, `discount_pct`, `total`.
+
+<PyCell
+  code={`
+def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = df.columns.str.strip()   # extend this chain
+    return df
+
+step1 = clean_columns(raw)
+list(step1.columns)
+`}
+  check={`
+_o = clean_columns(raw)
+assert list(_o.columns) == ["order_id", "customer_id", "order_date", "status", "country", "discount_pct", "total"], f"got {list(_o.columns)}"
+assert len(_o) == len(raw) and list(raw.columns)[0] == "Order ID", "return a renamed copy; leave raw untouched"
+`}
+  hint="Chain string methods: `.str.strip().str.lower().str.replace('%', 'pct').str.replace(' ', '_')`."
+  solution={`
+def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = df.columns.str.strip().str.lower().str.replace("%", "pct").str.replace(" ", "_")
+    return df
+
+step1 = clean_columns(raw)
+list(step1.columns)
+`}
+/>
+
+## 2. Rows that should not be there
+
+Exports are often concatenated from several pulls, so exact duplicates are common. And operational systems contain test records. Here, QA orders are booked to `customer_id` 0.
+
+<PyCell code={`
+print("exact duplicate rows:", step1.duplicated().sum())
+print("repeated order ids:  ", step1["order_id"].duplicated().sum())
+step1[step1["customer_id"] == 0].head(3)
+`} />
+
+**2.** Complete `drop_bad_rows`: remove exact duplicate rows and the QA orders. Afterwards `order_id` must be unique.
+
+<PyCell
+  code={`
+def drop_bad_rows(df: pd.DataFrame) -> pd.DataFrame:
+    return df   # replace with the filtered frame
+
+step2 = drop_bad_rows(step1)
+print(len(step2), step2["order_id"].is_unique)
+`}
+  check={`
+_o = drop_bad_rows(clean_columns(raw))
+assert (_o["customer_id"] != 0).all(), "QA orders (customer_id == 0) are still present"
+assert _o["order_id"].is_unique, "order_id still has duplicates: use drop_duplicates()"
+assert len(_o) == 2000, f"expected 2000 rows after cleaning, got {len(_o)}"
+`}
+  hint="`df.drop_duplicates()` then keep rows where `customer_id != 0`. Add `.reset_index(drop=True)` for a tidy index."
+  solution={`
+def drop_bad_rows(df: pd.DataFrame) -> pd.DataFrame:
+    return df.drop_duplicates().query("customer_id != 0").reset_index(drop=True)
+
+step2 = drop_bad_rows(step1)
+print(len(step2), step2["order_id"].is_unique)
+`}
+/>
+
+> Dropping *exact* duplicates is safe. If rows shared an `order_id` but differed elsewhere, you'd have a real conflict to investigate and to raise with the data owner, not something to "fix" with `keep="first"`.
+
+## 3. Categorical text
+
+**3.** Complete `clean_labels`. For `status`: trim whitespace, lower-case, and turn `"n/a"` into a real missing value. For `country`: map every spelling to one of the five codes `US`, `UK`, `DE`, `FR`, `CA`.
+
+Write the country mapping explicitly. An explicit map leaves unknown spellings missing, so it fails loudly when a new one appears next month; clever fuzzy matching fails silently.
+
+<PyCell
+  code={`
+COUNTRY_MAP = {
+    "us": "US", "usa": "US", "united states": "US", "u.s.": "US",
+    # complete the map: keys are lower-cased, stripped spellings
+}
+
+def clean_labels(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    # df["status"] = ...
+    df["country"] = df["country"].str.strip().str.lower().map(COUNTRY_MAP)
+    return df
+
+step3 = clean_labels(step2)
+print(step3["status"].value_counts(dropna=False), "\\n")
+print(step3["country"].value_counts(dropna=False))
+`}
+  check={`
+_o = clean_labels(drop_bad_rows(clean_columns(raw)))
+_s = _o["status"].dropna()
+assert set(_s.unique()) == {"completed", "cancelled", "refunded"}, f"status should only contain completed/cancelled/refunded (plus missing), got {sorted(_s.unique())[:6]}"
+assert _o["status"].isna().sum() == 30, f"expected 30 missing statuses (the N/A rows), got {_o['status'].isna().sum()}"
+assert _o["country"].notna().all(), f"{int(_o['country'].isna().sum())} rows have an unmapped country: complete COUNTRY_MAP"
+_t = dsw.load("orders").merge(dsw.load("customers")[["customer_id", "country"]], on="customer_id").set_index("order_id")["country"]
+assert (_o["country"].to_numpy() == _t.reindex(_o["order_id"]).to_numpy()).all(), "some countries are mapped to the wrong code"
+`}
+  hint="`df['status'].str.strip().str.lower().replace('n/a', pd.NA)`. To list every country spelling: `step2['country'].str.strip().str.lower().unique()`. GB and United Kingdom are both UK."
+  solution={`
+COUNTRY_MAP = {
+    "us": "US", "usa": "US", "united states": "US", "u.s.": "US",
+    "uk": "UK", "gb": "UK", "united kingdom": "UK",
+    "de": "DE", "germany": "DE",
+    "fr": "FR", "france": "FR",
+    "ca": "CA", "canada": "CA",
+}
+
+def clean_labels(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["status"] = df["status"].str.strip().str.lower().replace("n/a", pd.NA)
+    df["country"] = df["country"].str.strip().str.lower().map(COUNTRY_MAP)
+    return df
+
+step3 = clean_labels(step2)
+print(step3["status"].value_counts(dropna=False), "\\n")
+print(step3["country"].value_counts(dropna=False))
+`}
+/>
+
+## 4. Numbers stored as text
+
+<PyCell code={`
+print(step3["total"].sample(8, random_state=4).tolist())
+print(step3["discount_pct"].unique())
+`} />
+
+**4.** Complete `parse_numbers`: `discount_pct` becomes integers and `total` becomes floats. Strip currency symbols, thousands separators and the `USD` suffix; blanks stay missing. Use `pd.to_numeric(..., errors="raise")` so that anything you failed to anticipate stops you.
+
+<PyCell
+  code={`
+def parse_numbers(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    # df["discount_pct"] = ...
+    # df["total"] = ...
+    return df
+
+step4 = parse_numbers(step3)
+step4[["discount_pct", "total"]].describe().round(2)
+`}
+  check={`
+_o = parse_numbers(clean_labels(drop_bad_rows(clean_columns(raw))))
+assert pd.api.types.is_integer_dtype(_o["discount_pct"]), "discount_pct should be an integer column"
+assert set(_o["discount_pct"].unique()) <= {0, 10, 20, 30}, "discount_pct should hold 0, 10, 20 or 30"
+assert pd.api.types.is_float_dtype(_o["total"]), "total should be a float column"
+assert _o["total"].isna().sum() == 25, f"blank totals should stay missing: expected 25 missing, got {_o['total'].isna().sum()}"
+assert _o["total"].max() > 5000, "values look altered: only parse the text in this step"
+`}
+  hint="`df['discount_pct'].str.rstrip('%').astype(int)`. For total: `.str.replace(r'[$,]|USD', '', regex=True).str.strip()` then `pd.to_numeric`. Blank cells were already read as missing by `read_csv`."
+  solution={`
+def parse_numbers(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["discount_pct"] = df["discount_pct"].str.rstrip("%").astype(int)
+    df["total"] = pd.to_numeric(df["total"].str.replace(r"[$,]|USD", "", regex=True).str.strip(), errors="raise")
+    return df
+
+step4 = parse_numbers(step3)
+step4[["discount_pct", "total"]].describe().round(2)
+`}
+/>
+
+## 5. Implausible values
+
+The summary shows a maximum far above the 75th percentile. Look at the extremes before deciding anything.
+
+<PyCell code={`
+print(step4["total"].quantile([0.5, 0.99, 0.999]).round(2).to_dict())
+step4.nlargest(8, "total")[["order_id", "status", "total"]]
+`} />
+
+Six orders are roughly a hundred times too large and have no decimal part: they were logged in **cents**. This is a fixable unit error, not an outlier to delete. You confirm with Dana, then fix it with a rule you can state in one sentence.
+
+**5.** Complete `fix_cents`: divide `total` by 100 where it exceeds 3,000 (well above any genuine order here), and record which rows you changed in a boolean column `total_was_cents`.
+
+<PyCell
+  code={`
+def fix_cents(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["total_was_cents"] = False   # flag the affected rows, then fix them with .loc
+    return df
+
+step5 = fix_cents(step4)
+print(step5["total_was_cents"].sum(), "rows fixed; new max:", step5["total"].max())
+`}
+  check={`
+_o = fix_cents(parse_numbers(clean_labels(drop_bad_rows(clean_columns(raw)))))
+assert _o["total_was_cents"].dtype == bool, "total_was_cents should be a boolean column"
+assert _o["total_was_cents"].sum() == 6, f"expected 6 rows flagged, got {_o['total_was_cents'].sum()}"
+_t = dsw.load("orders").set_index("order_id")["total"].reindex(_o["order_id"]).to_numpy()
+_ok = _o["total"].isna() | ((_o["total"] - _t).abs() < 0.011)
+assert _ok.all(), f"{(~_ok).sum()} totals still disagree with the source system, e.g. order {_o.loc[~_ok, 'order_id'].iloc[0]}"
+`}
+  hint="`df['total_was_cents'] = df['total'] > 3000`, then `df.loc[df['total_was_cents'], 'total'] /= 100`."
+  solution={`
+def fix_cents(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["total_was_cents"] = df["total"] > 3000
+    df.loc[df["total_was_cents"], "total"] /= 100
+    return df
+
+step5 = fix_cents(step4)
+print(step5["total_was_cents"].sum(), "rows fixed; new max:", step5["total"].max())
+`}
+/>
+
+## 6. Dates in three formats
+
+<PyCell code={`
+print(step5["order_date"].sample(6, random_state=1).tolist())
+`} />
+
+Letting a parser guess is how 5 March becomes 3 May. `22/12/2024` is unambiguous, `05/03/2024` is not, and a guessing parser will happily pick a different reading per row. Parse each known format **explicitly** and combine.
+
+**6.** Complete `parse_dates` so `order_date` is a proper datetime column with nothing missing. The three formats are `%Y-%m-%d %H:%M:%S`, `%d/%m/%Y %H:%M` and `%b %d, %Y`.
+
+<PyCell
+  code={`
+def parse_dates(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    iso = pd.to_datetime(df["order_date"], format="%Y-%m-%d %H:%M:%S", errors="coerce")
+    # parse the other two formats the same way, then combine with .fillna(...)
+    df["order_date"] = iso
+    return df
+
+step6 = parse_dates(step5)
+print(step6["order_date"].dtype, step6["order_date"].isna().sum(), "missing")
+`}
+  check={`
+_o = parse_dates(fix_cents(parse_numbers(clean_labels(drop_bad_rows(clean_columns(raw))))))
+assert pd.api.types.is_datetime64_any_dtype(_o["order_date"]), "order_date should be a datetime column"
+assert _o["order_date"].notna().all(), f"{_o['order_date'].isna().sum()} dates failed to parse"
+_t = dsw.load("orders").set_index("order_id")["order_ts"].reindex(_o["order_id"]).dt.normalize().to_numpy()
+_bad = _o["order_date"].dt.normalize().to_numpy() != _t
+assert not _bad.any(), f"{_bad.sum()} dates are wrong (day and month swapped?), e.g. order {_o.loc[_bad, 'order_id'].iloc[0]}"
+`}
+  hint="`dmy = pd.to_datetime(df['order_date'], format='%d/%m/%Y %H:%M', errors='coerce')`, likewise for `'%b %d, %Y'`, then `iso.fillna(dmy).fillna(text)`."
+  solution={`
+def parse_dates(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    iso = pd.to_datetime(df["order_date"], format="%Y-%m-%d %H:%M:%S", errors="coerce")
+    dmy = pd.to_datetime(df["order_date"], format="%d/%m/%Y %H:%M", errors="coerce")
+    text = pd.to_datetime(df["order_date"], format="%b %d, %Y", errors="coerce")
+    df["order_date"] = iso.fillna(dmy).fillna(text)
+    return df
+
+step6 = parse_dates(step5)
+print(step6["order_date"].dtype, step6["order_date"].isna().sum(), "missing")
+`}
+/>
+
+## 7. One pipeline, permanent checks
+
+The six functions chain into a pipeline you can re-run on next month's file:
+
+<PyCell code={`
+def clean_orders(raw: pd.DataFrame) -> pd.DataFrame:
+    return (
+        raw.pipe(clean_columns)
+        .pipe(drop_bad_rows)
+        .pipe(clean_labels)
+        .pipe(parse_numbers)
+        .pipe(fix_cents)
+        .pipe(parse_dates)
+    )
+
+df = clean_orders(raw)
+print(df.dtypes)
+`} />
+
+Everything you verified by eye should also be code, so that next month's export is checked in a second. At work this is a **data contract**: rules the table must satisfy, run automatically (with tools such as pandera, Great Expectations or dbt tests). The core idea fits in one function.
+
+**7.** Complete `validate_orders(df)`, which returns a **list of problem descriptions** (an empty list means the table is valid). It must detect at least: duplicated `order_id`, QA orders (`customer_id` 0), statuses outside `completed`/`cancelled`/`refunded` (missing is allowed), and totals that are zero or negative (missing is allowed).
+
+<PyCell
+  code={`
+def validate_orders(df: pd.DataFrame) -> list[str]:
+    problems = []
+    if df["order_id"].duplicated().any():
+        problems.append(f"{df['order_id'].duplicated().sum()} duplicated order_id")
+    # add the other rules
+    return problems
+
+validate_orders(df)
+`}
+  check={`
+_c = parse_dates(fix_cents(parse_numbers(clean_labels(drop_bad_rows(clean_columns(raw))))))
+assert validate_orders(_c) == [], f"the cleaned table should pass, got {validate_orders(_c)}"
+_b = _c.copy(); _b.loc[_b.index[0], "customer_id"] = 0
+assert validate_orders(_b), "a QA order (customer_id == 0) was not detected"
+_b = _c.copy(); _b.loc[_b.index[0], "status"] = "shipped"
+assert validate_orders(_b), "an unknown status ('shipped') was not detected"
+_b = _c.copy(); _b.loc[_b.index[0], "total"] = -5.0
+assert validate_orders(_b), "a negative total was not detected"
+assert validate_orders(pd.concat([_c, _c.head(1)])), "a duplicated order_id was not detected"
+assert len(validate_orders(clean_columns(raw))) >= 3, "the raw export should fail at least three rules"
+`}
+  hint="For each rule build a boolean mask of bad rows and append a message if `mask.any()`. Statuses: `~df['status'].isin([...]) & df['status'].notna()`. Totals: `pd.to_numeric(df['total'], errors='coerce') <= 0`."
+  solution={`
+def validate_orders(df: pd.DataFrame) -> list[str]:
+    problems = []
+    if df["order_id"].duplicated().any():
+        problems.append(f"{df['order_id'].duplicated().sum()} duplicated order_id")
+    qa = df["customer_id"] == 0
+    if qa.any():
+        problems.append(f"{qa.sum()} QA orders (customer_id == 0)")
+    bad_status = ~df["status"].isin(["completed", "cancelled", "refunded"]) & df["status"].notna()
+    if bad_status.any():
+        problems.append(f"{bad_status.sum()} rows with unknown status, e.g. {sorted(df.loc[bad_status, 'status'].unique())[:3]}")
+    bad_total = pd.to_numeric(df["total"], errors="coerce") <= 0
+    if bad_total.any():
+        problems.append(f"{bad_total.sum()} rows with total <= 0")
+    return problems
+
+validate_orders(df)
+`}
+/>
+
+## 8. Reconcile and report
+
+Cleaning is finished when the result agrees with an independent source and you've written down what you did. Missing values that remain are **reported, not invented**: you don't fill 25 blank totals with the mean and call it revenue.
+
+<PyCell code={`
+finance = dsw.load("orders").set_index("order_id")["total"]
+matched = df.dropna(subset=["total"]).set_index("order_id")["total"]
+diff = (matched - finance.reindex(matched.index)).abs()
+
+print(f"""Orders export H2 2024: cleaning summary
+- {len(raw):,} rows received; {len(raw) - len(df):,} removed ({raw.duplicated().sum()} exact duplicates, {(raw['Customer ID'] == 0).sum()} QA orders)
+- validation: {validate_orders(df) or 'all rules pass'}
+- {len(df):,} orders remain, order_id unique
+- {df['total_was_cents'].sum()} totals were logged in cents and divided by 100 (confirmed with Ops)
+- {df['total'].isna().sum()} orders have no total and {df['status'].isna().sum()} have no status: left missing, list attached
+- Remaining totals agree with finance to the cent: {(diff < 0.011).all()}
+- Country and status labels normalised to 5 country codes and 3 statuses""")
+
+df.to_parquet("data/orders_export_clean.parquet", index=False)
+`} />
+
+<Lab title="Turn the checks into a schema" time="15 min">
+
+In your project, declare the same rules with **pandera**, the most common validation library for DataFrames:
+
+```bash
+uv add pandera
+```
+
+```python
+import pandas as pd
+import pandera.pandas as pa
+
+orders_schema = pa.DataFrameSchema(
+    {
+        "order_id": pa.Column(int, unique=True),
+        "customer_id": pa.Column(int, pa.Check.gt(0)),
+        "order_date": pa.Column("datetime64[ns]"),
+        "status": pa.Column(str, pa.Check.isin(["completed", "cancelled", "refunded"]), nullable=True),
+        "country": pa.Column(str, pa.Check.isin(["US", "UK", "DE", "FR", "CA"])),
+        "discount_pct": pa.Column(int, pa.Check.isin([0, 10, 20, 30])),
+        "total": pa.Column(float, pa.Check.gt(0), nullable=True),
+    },
+    strict=False,
+)
+
+clean = pd.read_parquet("data/orders_export_clean.parquet")   # written by your clean_orders()
+orders_schema.validate(clean, lazy=True)   # lazy=True reports every failure at once
+```
+
+Then break the data on purpose (set one status to `"shipped"`) and read the error report. Put the schema in a module, call `validate` at the top of every pipeline that reads this file, and bad data stops at the door.
+
+</Lab>

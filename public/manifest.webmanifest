@@ -1,7 +1,7 @@
 {
-  "name": "Data Science in 2026: Interactive Tutorial",
-  "short_name": "DS 2026",
-  "description": "Learn modern data science by running real Python in your browser.",
+  "name": "Data Science at Work",
+  "short_name": "DS at Work",
+  "description": "Hands-on practice in the day-to-day skills of a working data scientist.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

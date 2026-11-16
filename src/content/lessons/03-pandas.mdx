@@ -1,0 +1,320 @@
+---
+title: "pandas at working speed"
+description: "Method chains, safe assignment, group-wise transforms, reshaping, time series and vectorisation: the pandas you write on real tables."
+module: "Working with data"
+order: 3
+minutes: 40
+tools: ["pandas"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+Once data is out of the warehouse, pandas is where most analysis happens. This lesson drills the idioms you'll use daily, on current pandas (version 3), where two long-standing sources of bugs have changed: text columns are a real `str` type, and **copy-on-write** is always on.
+
+<PyCell code={`
+import dsw
+import pandas as pd
+
+orders = dsw.load("orders")
+customers = dsw.load("customers")
+order_items = dsw.load("order_items")
+products = dsw.load("products")
+completed = orders[orders["status"] == "completed"]
+print(pd.__version__, orders.shape)
+`} />
+
+## Assign with `.loc`, not through a chain
+
+With copy-on-write, every indexing result behaves like a copy. The classic chained assignment below now changes nothing (pandas warns you). Do the selection and the assignment in **one** `.loc` call.
+
+<PyCell code={`
+df = orders.head(5).copy()
+
+df[df["total"] > 100]["status"] = "big"             # modifies a temporary copy: no effect
+print(df["status"].tolist())
+
+df.loc[df["total"] > 100, "status"] = "big"         # one .loc call: works
+print(df["status"].tolist())
+`} />
+
+**1.** Finance reports on order-size bands. Add a column `band` to `orders` with `pd.cut`: `"small"` for totals under 50, `"medium"` for 50 up to (not including) 150, `"large"` for 150 up to 400, and `"xl"` for 400 and above.
+
+<PyCell
+  code={`
+orders["band"] = ...
+orders["band"].value_counts()
+`}
+  check={`
+assert "band" in orders.columns and not isinstance(orders["band"].iloc[0], type(...)), "create the band column with pd.cut"
+_e = pd.cut(orders["total"], [0, 50, 150, 400, float("inf")], labels=["small", "medium", "large", "xl"], right=False)
+_bad = orders["band"].astype(str) != _e.astype(str)
+assert not _bad.any(), f"{_bad.sum()} rows are in the wrong band, e.g. total={orders.loc[_bad, 'total'].iloc[0]} got {orders.loc[_bad, 'band'].iloc[0]!r}. Check right=False so that 50 falls in 'medium'."
+`}
+  hint="`pd.cut(orders['total'], bins=[0, 50, 150, 400, float('inf')], labels=[...], right=False)`. `right=False` makes each bin include its lower edge."
+  solution={`
+orders["band"] = pd.cut(
+    orders["total"],
+    bins=[0, 50, 150, 400, float("inf")],
+    labels=["small", "medium", "large", "xl"],
+    right=False,
+)
+orders["band"].value_counts()
+`}
+/>
+
+## Method chains
+
+A chain reads top to bottom as a recipe, leaves no half-finished variables behind, and is easy to review. The tools: `query`/boolean filters, `assign` (with a `lambda` to refer to the frame so far), `groupby().agg()` with named aggregations, and `pipe` for your own functions.
+
+<PyCell code={`
+(
+    orders
+    .query("status == 'completed' and order_ts >= '2024-01-01'")
+    .assign(
+        month=lambda d: d["order_ts"].dt.to_period("M"),
+        discounted=lambda d: d["discount_pct"] > 0,
+    )
+    .groupby("month")
+    .agg(
+        orders=("order_id", "count"),
+        revenue=("total", "sum"),
+        discounted_share=("discounted", "mean"),
+    )
+    .round(2)
+    .tail(4)
+)
+`} />
+
+**2.** Build `cust`: one row per customer who has at least one completed order, indexed by `customer_id`, with columns `n_orders`, `revenue`, `first_order` and `last_order` (timestamps).
+
+<PyCell
+  code={`
+cust = (
+    completed
+    .groupby("customer_id")
+    .agg(...)   # your named aggregations
+)
+cust.head()
+`}
+  check={`
+_g = orders[orders["status"] == "completed"].groupby("customer_id")
+_e = pd.DataFrame({"n_orders": _g.size(), "revenue": _g["total"].sum(), "first_order": _g["order_ts"].min(), "last_order": _g["order_ts"].max()}).reset_index()
+assert isinstance(cust, pd.DataFrame), "cust should be a DataFrame: finish the chain with .agg(...)"
+dsw.same(cust, _e)
+`}
+  hint="`.agg(n_orders=('order_id', 'count'), revenue=('total', 'sum'), first_order=('order_ts', 'min'), last_order=('order_ts', 'max'))`"
+  solution={`
+cust = (
+    completed
+    .groupby("customer_id")
+    .agg(
+        n_orders=("order_id", "count"),
+        revenue=("total", "sum"),
+        first_order=("order_ts", "min"),
+        last_order=("order_ts", "max"),
+    )
+)
+cust.head()
+`}
+/>
+
+## Group-wise columns: `transform`, `cumcount`, `diff`
+
+`agg` collapses each group to one row. When you need a value **per original row** that depends on its group (the pandas equivalent of a SQL window function), use `transform` and friends. They return a result aligned to the original index.
+
+<PyCell code={`
+seq = completed.sort_values(["customer_id", "order_ts"]).copy()
+g = seq.groupby("customer_id")
+
+seq["customer_revenue"] = g["total"].transform("sum")            # sum(...) OVER (PARTITION BY customer_id)
+seq["share_of_customer"] = seq["total"] / seq["customer_revenue"]
+seq["running_total"] = g["total"].cumsum()                       # running sum within customer
+seq[["customer_id", "order_ts", "total", "share_of_customer", "running_total"]].head(6).round({"share_of_customer": 3, "running_total": 2})
+`} />
+
+**3.** On `seq` (already sorted by customer and time), add `order_number` (1 for a customer's first completed order, 2 for the second, ...) and `days_since_prev` (days since that customer's previous completed order, as a float; missing for first orders).
+
+<PyCell
+  code={`
+seq["order_number"] = ...
+seq["days_since_prev"] = ...
+seq[["customer_id", "order_ts", "order_number", "days_since_prev"]].head(6)
+`}
+  check={`
+_s = orders[orders["status"] == "completed"].sort_values(["customer_id", "order_ts"])
+_n = _s.groupby("customer_id").cumcount() + 1
+_d = _s.groupby("customer_id")["order_ts"].diff().dt.total_seconds() / 86400
+assert not isinstance(seq["order_number"].iloc[0], type(...)), "replace the ... placeholders"
+assert (seq["order_number"].to_numpy() == _n.to_numpy()).all(), "order_number: use groupby('customer_id').cumcount() + 1"
+_mine = pd.to_numeric(seq["days_since_prev"], errors="coerce")
+assert _mine.isna().sum() == _d.isna().sum(), "days_since_prev should be missing exactly for each customer's first order"
+assert ((_mine - _d).abs().dropna() < 1).all(), "days_since_prev: groupby('customer_id')['order_ts'].diff(), converted to days"
+`}
+  hint="`g.cumcount() + 1` numbers rows within each group. `g['order_ts'].diff()` gives a Timedelta; divide by `pd.Timedelta(days=1)` to get float days."
+  solution={`
+seq["order_number"] = g.cumcount() + 1
+seq["days_since_prev"] = g["order_ts"].diff() / pd.Timedelta(days=1)
+seq[["customer_id", "order_ts", "order_number", "days_since_prev"]].head(6)
+`}
+/>
+
+## Reshaping: long to wide and back
+
+Stakeholders read wide tables; analysis wants long ones. `pivot_table` goes wide, `melt` goes long.
+
+<PyCell code={`
+wide = (
+    completed
+    .assign(quarter=lambda d: d["order_ts"].dt.to_period("Q"))
+    .pivot_table(index="quarter", columns="device", values="total", aggfunc="sum", margins=True, margins_name="all")
+    .round(0)
+)
+wide
+`} />
+
+**4.** Build `mix`: for each month of **2024** (index: monthly `Period`, named `month`), each device's **share of that month's completed revenue**. Columns are the devices; every row sums to 1.
+
+<PyCell
+  code={`
+mix = ...
+mix.round(3)
+`}
+  check={`
+_c = orders[(orders["status"] == "completed") & (orders["order_ts"] >= "2024-01-01")]
+_p = _c.assign(month=_c["order_ts"].dt.to_period("M")).pivot_table(index="month", columns="device", values="total", aggfunc="sum")
+_e = _p.div(_p.sum(axis=1), axis=0)
+assert isinstance(mix, pd.DataFrame), "mix should be a DataFrame"
+assert sorted(mix.columns) == sorted(_e.columns), f"columns should be the devices {sorted(_e.columns)}, got {list(mix.columns)}"
+assert len(mix) == 12, f"expected 12 monthly rows for 2024, got {len(mix)}"
+assert ((mix.sum(axis=1) - 1).abs() < 1e-9).all(), "each row should sum to 1: divide by the row total with .div(row_sum, axis=0)"
+assert ((mix[_e.columns].to_numpy() - _e.to_numpy()) ** 2).sum() < 1e-12, "values differ: completed orders in 2024, sum of total by month and device, divided by the month total"
+`}
+  hint="Pivot to month x device revenue, then `.div(p.sum(axis=1), axis=0)` (or `.pipe(lambda p: p.div(p.sum(axis=1), axis=0))` to stay in the chain)."
+  solution={`
+mix = (
+    completed
+    .query("order_ts >= '2024-01-01'")
+    .assign(month=lambda d: d["order_ts"].dt.to_period("M"))
+    .pivot_table(index="month", columns="device", values="total", aggfunc="sum")
+    .pipe(lambda p: p.div(p.sum(axis=1), axis=0))
+)
+mix.round(3)
+`}
+/>
+
+## Time series: `resample` and `rolling`
+
+With a datetime index, `resample` is a time-aware `groupby` (and it keeps empty periods, which `groupby` on a truncated date silently drops). `rolling` smooths.
+
+<PyCell code={`
+daily = completed.set_index("order_ts")["total"].resample("D").sum()
+print(daily.tail(3), "\\n")
+print("days with zero revenue kept in the series:", int((daily == 0).sum()))
+`} />
+
+**5.** Create `weekly`: completed revenue per week (`resample("W")`), and `weekly_ma4`: its 4-week moving average.
+
+<PyCell
+  code={`
+weekly = ...
+weekly_ma4 = ...
+
+ax = weekly.plot(alpha=0.4, label="weekly revenue", figsize=(8, 3.4))
+weekly_ma4.plot(ax=ax, label="4-week average")
+ax.set_xlabel("")
+ax.legend();
+`}
+  check={`
+_w = orders[orders["status"] == "completed"].set_index("order_ts")["total"].resample("W").sum()
+assert isinstance(weekly, pd.Series) and len(weekly) == len(_w), "weekly: completed.set_index('order_ts')['total'].resample('W').sum()"
+assert (weekly - _w).abs().max() < 0.01, "weekly values differ: sum of total per week for completed orders"
+assert (weekly_ma4 - _w.rolling(4).mean()).abs().max() < 0.01, "weekly_ma4 should be weekly.rolling(4).mean()"
+`}
+  hint="`completed.set_index('order_ts')['total'].resample('W').sum()` then `.rolling(4).mean()`."
+  solution={`
+weekly = completed.set_index("order_ts")["total"].resample("W").sum()
+weekly_ma4 = weekly.rolling(4).mean()
+
+ax = weekly.plot(alpha=0.4, label="weekly revenue", figsize=(8, 3.4))
+weekly_ma4.plot(ax=ax, label="4-week average")
+ax.set_xlabel("")
+ax.legend();
+`}
+/>
+
+## Vectorise: never loop over rows
+
+`apply(axis=1)` and `iterrows` call Python once per row. On the item table that is over a hundred thousand calls. Column arithmetic does the same work in compiled code.
+
+<PyCell code={`
+import time
+
+items = order_items.merge(products[["product_id", "category", "price", "unit_cost"]], on="product_id", validate="many_to_one")
+sample = items.head(20_000)
+
+t0 = time.perf_counter()
+slow = sample.apply(lambda r: r["quantity"] * (r["unit_price"] - r["unit_cost"]), axis=1)
+t_slow = time.perf_counter() - t0
+
+t0 = time.perf_counter()
+fast = sample["quantity"] * (sample["unit_price"] - sample["unit_cost"])
+t_fast = time.perf_counter() - t0
+
+print(f"apply(axis=1): {t_slow * 1000:7.1f} ms")
+print(f"vectorised:    {t_fast * 1000:7.1f} ms   ({t_slow / t_fast:,.0f}x faster, same result: {slow.round(6).equals(fast.round(6))})")
+`} />
+
+**6.** The pricing team's script below assigns a discount tier row by row with `apply`. `items` already has the product's list `price`. Replace it with a vectorised version using `numpy.select` that stores the same values in `items["tier"]`: `"deep"` when the unit price is below 75% of the product's list `price`, `"light"` when it is below 100% of it, otherwise `"full"`.
+
+<PyCell
+  code={`
+import numpy as np
+
+def tier(row):  # slow, row by row
+    ratio = row["unit_price"] / row["price"]
+    if ratio < 0.75:
+        return "deep"
+    if ratio < 1:
+        return "light"
+    return "full"
+
+items["tier"] = ...   # vectorised: no apply, no loop
+items["tier"].value_counts()
+`}
+  check={`
+assert "tier" in items.columns and not isinstance(items["tier"].iloc[0], type(...)), "assign the vectorised result to items['tier']"
+_r = items["unit_price"] / items["price"]
+_e = np.select([_r < 0.75, _r < 1], ["deep", "light"], default="full")
+assert (items["tier"].astype(str).to_numpy() == _e).all(), "tiers differ: ratio = unit_price / price; < 0.75 deep, < 1 light, else full"
+`}
+  hint="`ratio = items['unit_price'] / items['price']`, then `np.select([ratio < 0.75, ratio < 1], ['deep', 'light'], default='full')`. Conditions are checked in order."
+  solution={`
+import numpy as np
+
+ratio = items["unit_price"] / items["price"]
+items["tier"] = np.select([ratio < 0.75, ratio < 1], ["deep", "light"], default="full")
+items["tier"].value_counts()
+`}
+/>
+
+## Types and memory
+
+Check `dtypes` after every load. Low-cardinality text as `category` and right-sized integers routinely halve memory (far more on wide, text-heavy tables), which is often the difference between "fits in RAM" and "doesn't".
+
+<PyCell code={`
+before = orders.memory_usage(deep=True).sum()
+slim = orders.astype({"status": "category", "device": "category", "discount_pct": "int8", "customer_id": "int32", "order_id": "int32"})
+after = slim.memory_usage(deep=True).sum()
+print(f"{before / 1e6:.1f} MB -> {after / 1e6:.1f} MB")
+slim.dtypes
+`} />
+
+<Lab title="Profile a slow notebook" time="10 min">
+
+In your `bramble-analysis` project from lesson 1, open a notebook and load `data/order_items.parquet` and `data/products.csv`.
+
+1. Time the row-wise version of exercise 6 with `%timeit -n1 -r1 items.apply(tier, axis=1)` and your vectorised version with `%timeit`.
+2. Run `%prun -l 10 items.apply(tier, axis=1)` and read the profile: almost all time is spent in pandas' per-row machinery (`__getitem__`, building a Series per row), not in your function.
+3. Save the result both ways and compare sizes: `items.to_csv("items.csv")` versus `items.to_parquet("items.parquet")`. Parquet keeps dtypes, is several times smaller and loads much faster. Default to it for anything you write to disk.
+
+</Lab>

@@ -1,25 +1,25 @@
-// Service worker: makes the tutorial installable and usable offline.
-// Bump VERSION when you change caching logic here (content updates don't need it).
-const VERSION = 'v1';
-const PAGES = `pages-${VERSION}`;
-const ASSETS = `assets-${VERSION}`;
-const PYODIDE = 'pyodide'; // URLs are versioned, so this cache never needs bumping
+import type { APIRoute } from 'astro';
+import { getLessons } from '../lib/lessons';
+
+// The service worker is generated at build time so that every deploy ships a
+// new worker (new BUILD id), which re-caches all lesson pages.
+const BUILD = Date.now().toString(36);
+
+export const GET: APIRoute = async () => {
+  const pages = (await getLessons()).filter((l) => l.data.status === 'ready').map((l) => `lessons/${l.id}/`);
+  const js = `// Service worker: makes the tutorial installable and usable offline.
+const BUILD = ${JSON.stringify(BUILD)};
+const PAGES = 'pages-' + BUILD;
+const ASSETS = 'assets-' + BUILD;
+const PYODIDE = 'pyodide'; // URLs are versioned, so this cache survives deploys
 const SCOPE = new URL(self.registration.scope);
+const PRECACHE = ${JSON.stringify(['./', 'manifest.webmanifest', 'favicon.svg', 'icons/icon-192.png', ...pages])};
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     (async () => {
       const cache = await caches.open(PAGES);
-      const core = ['./', 'manifest.webmanifest', 'favicon.svg', 'icons/icon-192.png'].map((p) => new URL(p, SCOPE).href);
-      await cache.addAll(core);
-      // Pre-cache every lesson page (list generated at build time by src/pages/precache.json.ts).
-      try {
-        const res = await fetch(new URL('precache.json', SCOPE));
-        const { pages } = await res.json();
-        await cache.addAll(pages.map((p) => new URL(p, SCOPE).href));
-      } catch {
-        /* non-fatal: pages will be cached as they are visited */
-      }
+      await cache.addAll(PRECACHE.map((p) => new URL(p, SCOPE).href));
       await self.skipWaiting();
     })(),
   );
@@ -59,7 +59,6 @@ self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
-
   if (url.origin === 'https://cdn.jsdelivr.net' && url.pathname.startsWith('/pyodide/')) {
     event.respondWith(cacheFirst(PYODIDE, request));
   } else if (url.origin === SCOPE.origin && url.pathname.startsWith(SCOPE.pathname)) {
@@ -68,3 +67,6 @@ self.addEventListener('fetch', (event) => {
     else event.respondWith(networkFirst(ASSETS, request));
   }
 });
+`;
+  return new Response(js, { headers: { 'Content-Type': 'text/javascript' } });
+};

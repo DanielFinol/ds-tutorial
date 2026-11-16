@@ -1,0 +1,370 @@
+---
+title: "SQL you'll write every day"
+description: "Joins without double counting, CTEs, window functions, anti-joins and date logic, on a warehouse-style schema."
+module: "Working with data"
+order: 2
+minutes: 40
+tools: ["SQL", "DuckDB"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+Most data at work lives in a SQL warehouse (Snowflake, BigQuery, Redshift, Postgres), and most analyses start with a query. These cells run **DuckDB**, an in-process analytics database whose SQL is close to what those warehouses accept. Where dialects differ, the lesson says so.
+
+Run this once to load Bramble's tables into the database.
+
+<PyCell code={`
+import dsw, duckdb
+
+dsw.register_duckdb()
+duckdb.sql("SHOW TABLES")
+`} />
+
+SQL cells below run your query and show the result. (The result is also kept as a pandas DataFrame called `result`, which is how the checks read it.)
+
+<PyCell lang="sql" code={`
+DESCRIBE orders
+`} />
+
+## Aggregating over time
+
+The pattern you'll type most: filter, truncate a timestamp to a period, aggregate. Note the half-open date range and the `FILTER` clause for conditional counts (in BigQuery write `COUNTIF(...)`; anywhere, `SUM(CASE WHEN ... THEN 1 ELSE 0 END)` works).
+
+<PyCell lang="sql" code={`
+SELECT
+    date_trunc('month', order_ts)                AS month,
+    count(*)                                     AS orders,
+    count(*) FILTER (WHERE status = 'refunded')  AS refunded,
+    round(sum(total) FILTER (WHERE status = 'completed'), 2) AS revenue
+FROM orders
+WHERE order_ts >= DATE '2024-07-01' AND order_ts < DATE '2025-01-01'
+GROUP BY 1
+ORDER BY 1
+`} />
+
+**1.** A variation for the operations team: for each `device`, the number of completed orders (`orders`) and the average order value rounded to 2 decimals (`aov`), for orders placed in **November 2024**. Sort by `orders`, highest first.
+
+<PyCell
+  lang="sql"
+  code={`
+SELECT
+    device
+    -- your aggregates here
+FROM orders
+`}
+  check={`
+_e = duckdb.sql("SELECT device, count(*) AS orders, round(avg(total), 2) AS aov FROM orders WHERE status = 'completed' AND order_ts >= DATE '2024-11-01' AND order_ts < DATE '2024-12-01' GROUP BY 1 ORDER BY 2 DESC").df()
+dsw.same(result, _e, ordered=True)
+`}
+  hint="`WHERE status = 'completed' AND order_ts >= DATE '2024-11-01' AND order_ts < DATE '2024-12-01'`, then `GROUP BY device ORDER BY orders DESC`."
+  solution={`
+SELECT
+    device,
+    count(*)             AS orders,
+    round(avg(total), 2) AS aov
+FROM orders
+WHERE status = 'completed'
+  AND order_ts >= DATE '2024-11-01' AND order_ts < DATE '2024-12-01'
+GROUP BY device
+ORDER BY orders DESC
+`}
+/>
+
+## Joins and the fan-out trap
+
+The most expensive SQL mistake is a join that silently multiplies rows. `orders` has one row per order; `order_items` has one row per product in an order. Join them and each order's `total` repeats once per item:
+
+<PyCell lang="sql" code={`
+SELECT
+    (SELECT round(sum(total)) FROM orders WHERE status = 'completed')  AS true_revenue,
+    round(sum(o.total))                                                AS revenue_after_join
+FROM orders o
+JOIN order_items i USING (order_id)
+WHERE o.status = 'completed'
+`} />
+
+The inflated number looks plausible, which is why this ships to dashboards. Rules that prevent it:
+
+- Know the **grain** of every table you join, and aggregate to a common grain *before* joining.
+- Measures belong to one grain. Order-level measures (`total`, `shipping_fee`) must never be summed at item level.
+- After any join, compare `count(*)` with the row count you expected.
+
+**2.** Revenue by product category has to be built from item-level measures. For **completed** orders, return `category`, `units` (sum of `quantity`) and `revenue` (sum of `quantity * unit_price`, rounded to 2 decimals), sorted by revenue, highest first.
+
+<PyCell
+  lang="sql"
+  code={`
+SELECT
+    p.category
+FROM order_items i
+JOIN products p USING (product_id)
+`}
+  check={`
+_e = duckdb.sql("SELECT p.category, sum(i.quantity) AS units, round(sum(i.quantity * i.unit_price), 2) AS revenue FROM order_items i JOIN orders o USING (order_id) JOIN products p USING (product_id) WHERE o.status = 'completed' GROUP BY 1 ORDER BY 3 DESC").df()
+dsw.same(result, _e, ordered=True)
+`}
+  hint="Join `orders` as well so you can filter on `o.status = 'completed'`. The grain stays at item level, so summing item measures is safe."
+  solution={`
+SELECT
+    p.category,
+    sum(i.quantity)                          AS units,
+    round(sum(i.quantity * i.unit_price), 2) AS revenue
+FROM order_items i
+JOIN orders o   USING (order_id)
+JOIN products p USING (product_id)
+WHERE o.status = 'completed'
+GROUP BY p.category
+ORDER BY revenue DESC
+`}
+/>
+
+## Finding what's missing: anti-joins
+
+"Which customers have *never* done X" is a `LEFT JOIN ... WHERE right.key IS NULL` or a `NOT EXISTS`. Avoid `NOT IN (subquery)`: if the subquery returns a single `NULL`, it returns no rows at all.
+
+<PyCell lang="sql" code={`
+-- Customers with no support ticket, by channel
+SELECT c.channel, count(*) AS customers_without_tickets
+FROM customers c
+LEFT JOIN tickets t USING (customer_id)
+WHERE t.ticket_id IS NULL
+GROUP BY ALL
+ORDER BY 2 DESC
+`} />
+
+**3.** The CRM team wants a win-back list: customers who signed up in the **first half of 2024** and have **no completed order**. Return one row per `channel` with `signups` (all H1 signups) and `never_ordered` (those without a completed order), sorted by channel.
+
+<PyCell
+  lang="sql"
+  code={`
+SELECT
+    c.channel
+FROM customers c
+`}
+  check={`
+_e = duckdb.sql("SELECT c.channel, count(*) AS signups, count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id AND o.status = 'completed')) AS never_ordered FROM customers c WHERE c.signup_date >= DATE '2024-01-01' AND c.signup_date < DATE '2024-07-01' GROUP BY 1 ORDER BY 1").df()
+dsw.same(result, _e, ordered=True)
+`}
+  hint="Left-join a subquery of distinct `customer_id` from completed orders, then `count(*)` for signups and `count(*) FILTER (WHERE o.customer_id IS NULL)` for never_ordered."
+  solution={`
+SELECT
+    c.channel,
+    count(*)                                      AS signups,
+    count(*) FILTER (WHERE o.customer_id IS NULL) AS never_ordered
+FROM customers c
+LEFT JOIN (
+    SELECT DISTINCT customer_id FROM orders WHERE status = 'completed'
+) o USING (customer_id)
+WHERE c.signup_date >= DATE '2024-01-01' AND c.signup_date < DATE '2024-07-01'
+GROUP BY c.channel
+ORDER BY c.channel
+`}
+/>
+
+## CTEs and window functions
+
+Real queries are built in named steps with `WITH`. Window functions then compute per-row values *across related rows* without collapsing them. The three you need constantly:
+
+| Need | Window function |
+| --- | --- |
+| First / latest / top-N row per group | `row_number() OVER (PARTITION BY ... ORDER BY ...)` |
+| Previous row's value | `lag(x) OVER (PARTITION BY ... ORDER BY ...)` |
+| Running or rolling totals | `sum(x) OVER (ORDER BY ... ROWS BETWEEN ...)` |
+
+Here is "latest ticket per customer". `QUALIFY` filters on a window result (Snowflake, BigQuery, DuckDB, Databricks). In Postgres or Redshift, wrap the query in a CTE and filter with `WHERE rn = 1`.
+
+<PyCell lang="sql" code={`
+SELECT customer_id, created_ts, category, csat
+FROM tickets
+QUALIFY row_number() OVER (PARTITION BY customer_id ORDER BY created_ts DESC) = 1
+ORDER BY created_ts DESC
+LIMIT 5
+`} />
+
+**4.** Merchandising asks for the **top 3 products by revenue in each category** (completed orders). Return `category`, `name`, `revenue` (rounded to 2 decimals) and `rank` (1 to 3), sorted by category, then rank.
+
+<PyCell
+  lang="sql"
+  code={`
+WITH product_revenue AS (
+    SELECT p.category, p.name, sum(i.quantity * i.unit_price) AS revenue
+    FROM order_items i
+    JOIN orders o   USING (order_id)
+    JOIN products p USING (product_id)
+    WHERE o.status = 'completed'
+    GROUP BY ALL
+)
+SELECT *
+FROM product_revenue
+`}
+  check={`
+_e = duckdb.sql("WITH pr AS (SELECT p.category, p.name, sum(i.quantity * i.unit_price) AS revenue FROM order_items i JOIN orders o USING (order_id) JOIN products p USING (product_id) WHERE o.status = 'completed' GROUP BY ALL) SELECT category, name, round(revenue, 2) AS revenue, row_number() OVER (PARTITION BY category ORDER BY revenue DESC) AS rank FROM pr QUALIFY rank <= 3 ORDER BY category, rank").df()
+dsw.same(result, _e, ordered=True)
+`}
+  hint="Add `row_number() OVER (PARTITION BY category ORDER BY revenue DESC) AS rank` to the final SELECT, then `QUALIFY rank <= 3`."
+  solution={`
+WITH product_revenue AS (
+    SELECT p.category, p.name, sum(i.quantity * i.unit_price) AS revenue
+    FROM order_items i
+    JOIN orders o   USING (order_id)
+    JOIN products p USING (product_id)
+    WHERE o.status = 'completed'
+    GROUP BY ALL
+)
+SELECT
+    category,
+    name,
+    round(revenue, 2) AS revenue,
+    row_number() OVER (PARTITION BY category ORDER BY revenue DESC) AS rank
+FROM product_revenue
+QUALIFY rank <= 3
+ORDER BY category, rank
+`}
+/>
+
+**5.** "New versus returning" appears on every commercial dashboard. For each month of **2024**, count completed orders that were a customer's **first ever** completed order (`new_orders`) and those that were not (`repeat_orders`). Columns: `month`, `new_orders`, `repeat_orders`, sorted by month.
+
+Number each customer's orders *before* filtering to 2024, or every customer's first 2024 order will look "new".
+
+<PyCell
+  lang="sql"
+  code={`
+WITH numbered AS (
+    SELECT
+        order_id,
+        order_ts,
+        row_number() OVER (PARTITION BY customer_id ORDER BY order_ts) AS order_number
+    FROM orders
+    WHERE status = 'completed'
+)
+SELECT *
+FROM numbered
+LIMIT 5
+`}
+  check={`
+_e = duckdb.sql("WITH n AS (SELECT order_ts, row_number() OVER (PARTITION BY customer_id ORDER BY order_ts) AS k FROM orders WHERE status = 'completed') SELECT date_trunc('month', order_ts) AS month, count(*) FILTER (WHERE k = 1) AS new_orders, count(*) FILTER (WHERE k > 1) AS repeat_orders FROM n WHERE order_ts >= DATE '2024-01-01' AND order_ts < DATE '2025-01-01' GROUP BY 1 ORDER BY 1").df()
+dsw.same(result, _e, ordered=True)
+`}
+  hint="Keep the CTE. In the final SELECT: `date_trunc('month', order_ts) AS month`, `count(*) FILTER (WHERE order_number = 1)`, `count(*) FILTER (WHERE order_number > 1)`, with the 2024 date filter in the final WHERE."
+  solution={`
+WITH numbered AS (
+    SELECT
+        order_id,
+        order_ts,
+        row_number() OVER (PARTITION BY customer_id ORDER BY order_ts) AS order_number
+    FROM orders
+    WHERE status = 'completed'
+)
+SELECT
+    date_trunc('month', order_ts)                AS month,
+    count(*) FILTER (WHERE order_number = 1)     AS new_orders,
+    count(*) FILTER (WHERE order_number > 1)     AS repeat_orders
+FROM numbered
+WHERE order_ts >= DATE '2024-01-01' AND order_ts < DATE '2025-01-01'
+GROUP BY 1
+ORDER BY 1
+`}
+/>
+
+**6.** How long do customers wait between purchases? Use `lag` to get each completed order's previous order time for the same customer, then return, per acquisition `channel`, the **median** days between consecutive orders as `median_gap_days` and the number of gaps as `gaps`. Sort by channel.
+
+<PyCell
+  lang="sql"
+  code={`
+WITH gaps AS (
+    SELECT
+        customer_id,
+        order_ts,
+        lag(order_ts) OVER (PARTITION BY customer_id ORDER BY order_ts) AS prev_ts
+    FROM orders
+    WHERE status = 'completed'
+)
+SELECT *, date_diff('day', prev_ts, order_ts) AS gap_days
+FROM gaps
+LIMIT 5
+`}
+  check={`
+_e = duckdb.sql("WITH g AS (SELECT customer_id, order_ts, lag(order_ts) OVER (PARTITION BY customer_id ORDER BY order_ts) AS prev_ts FROM orders WHERE status = 'completed') SELECT c.channel, median(date_diff('day', g.prev_ts, g.order_ts)) AS median_gap_days, count(*) AS gaps FROM g JOIN customers c USING (customer_id) WHERE g.prev_ts IS NOT NULL GROUP BY 1 ORDER BY 1").df()
+dsw.same(result, _e, ordered=True)
+`}
+  hint="Join `gaps` to `customers`, keep rows `WHERE prev_ts IS NOT NULL`, then `median(date_diff('day', prev_ts, order_ts))` and `count(*)` grouped by channel."
+  solution={`
+WITH gaps AS (
+    SELECT
+        customer_id,
+        order_ts,
+        lag(order_ts) OVER (PARTITION BY customer_id ORDER BY order_ts) AS prev_ts
+    FROM orders
+    WHERE status = 'completed'
+)
+SELECT
+    c.channel,
+    median(date_diff('day', g.prev_ts, g.order_ts)) AS median_gap_days,
+    count(*)                                        AS gaps
+FROM gaps g
+JOIN customers c USING (customer_id)
+WHERE g.prev_ts IS NOT NULL
+GROUP BY c.channel
+ORDER BY c.channel
+`}
+/>
+
+## NULLs bite quietly
+
+<PyCell lang="sql" code={`
+SELECT
+    count(*)                              AS tickets,
+    count(csat)                           AS tickets_with_csat,   -- count(col) skips NULLs
+    round(avg(csat), 2)                   AS avg_csat,            -- so does avg: this is the mean of answered surveys
+    round(avg(coalesce(csat, 0)), 2)      AS wrong_avg,           -- treating "no answer" as 0 is almost never right
+    count(*) FILTER (WHERE csat <> 5)     AS not_five,            -- NULL <> 5 is NULL, not TRUE: unanswered rows vanish
+    count(*) FILTER (WHERE csat IS DISTINCT FROM 5) AS not_five_incl_null
+FROM tickets
+`} />
+
+## From SQL to Python and back
+
+In a notebook you'll usually pull a query result into a DataFrame, and DuckDB can also query DataFrames and files directly.
+
+<PyCell code={`
+monthly = duckdb.sql("""
+    SELECT date_trunc('month', order_ts) AS month, sum(total) AS revenue
+    FROM orders
+    WHERE status = 'completed'
+    GROUP BY 1 ORDER BY 1
+""").df()
+
+# ...and SQL over a DataFrame that only exists in Python:
+duckdb.sql("SELECT year(month) AS year, round(sum(revenue)) AS revenue FROM monthly GROUP BY 1 ORDER BY 1")
+`} />
+
+<Lab title="Query a real warehouse from Python" time="15 min">
+
+Against a warehouse you connect with a driver, **never build SQL by pasting values into strings**, and let the database do the heavy lifting.
+
+```bash
+uv add sqlalchemy psycopg[binary] pandas
+```
+
+```python
+import os
+import pandas as pd
+from sqlalchemy import create_engine, text
+
+# Credentials come from the environment or a secrets manager, never from the notebook.
+engine = create_engine(os.environ["WAREHOUSE_URL"])  # e.g. postgresql+psycopg://user:pass@host/db
+
+query = text("""
+    SELECT date_trunc('month', order_ts) AS month, sum(total) AS revenue
+    FROM analytics.orders
+    WHERE status = :status AND order_ts >= :start
+    GROUP BY 1 ORDER BY 1
+""")
+monthly = pd.read_sql(query, engine, params={"status": "completed", "start": "2024-01-01"})
+```
+
+No warehouse handy? Run Postgres locally with `docker run --rm -e POSTGRES_PASSWORD=pw -p 5432:5432 postgres:17`, load a table with `orders.to_sql("orders", engine)`, and run exercises 4 and 5 against it. Postgres supports `FILTER` but not `QUALIFY` or `GROUP BY ALL`, so you will have to rewrite those parts; that translation is the exercise.
+
+Dialect notes you'll hit in your first week: BigQuery uses `DATE_TRUNC(order_ts, MONTH)` and backticked table names; Snowflake upper-cases unquoted identifiers; Postgres has no `QUALIFY`; `GROUP BY ALL` exists in DuckDB, Snowflake, BigQuery and Databricks but not Postgres.
+
+</Lab>
