@@ -1,0 +1,42 @@
+---
+import '../styles/global.css';
+import { url } from '../lib/paths';
+
+interface Props {
+  title: string;
+  description?: string;
+}
+const { title, description = 'Learn modern data science by running real Python in your browser.' } = Astro.props;
+const fullTitle = title === 'Data Science in 2026' ? title : `${title} · Data Science in 2026`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{fullTitle}</title>
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#1f6f5c" />
+    <link rel="icon" href={url('favicon.svg')} type="image/svg+xml" />
+    <link rel="apple-touch-icon" href={url('icons/icon-192.png')} />
+    <link rel="manifest" href={url('manifest.webmanifest')} />
+    <script src="../lib/pwa.ts"></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="wrap">
+        <a class="brand" href={url()}>Data Science <span>in 2026</span></a>
+        <nav><a href={url()}>Lessons</a></nav>
+      </div>
+    </header>
+    <main class="wrap">
+      <slot />
+    </main>
+    <footer class="site-footer">
+      <div class="wrap">
+        All code runs locally in your browser via Pyodide, with no server and no sign-up. Works offline after your first visit.
+      </div>
+    </footer>
+  </body>
+</html>

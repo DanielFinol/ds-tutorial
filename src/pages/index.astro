@@ -1,0 +1,62 @@
+---
+import Base from '../layouts/Base.astro';
+import { getLessons, groupByModule } from '../lib/lessons';
+import { url } from '../lib/paths';
+
+const lessons = await getLessons();
+const modules = groupByModule(lessons);
+const firstReady = lessons.find((l) => l.data.status === 'ready');
+---
+
+<Base title="Data Science in 2026">
+  <h1>Data Science in 2026</h1>
+  <p class="lede">
+    An interactive, hands-on tutorial. Every code cell runs real Python (pandas, NumPy, scikit-learn and matplotlib) right here in your browser.
+  </p>
+  {firstReady && <p><a class="btn" href={url(`lessons/${firstReady.id}/`)} style="text-decoration:none">Start learning →</a></p>}
+
+  {
+    modules.map(([name, items]) => (
+      <section class="module">
+        <h2>{name}</h2>
+        <ul class="lesson-list">
+          {items.map((l) => (
+            <li>
+              {l.data.status === 'ready' ? (
+                <a class="lesson-card" href={url(`lessons/${l.id}/`)} data-lesson={l.id}>
+                  <span class="num">{l.data.order}</span>
+                  <div>
+                    <h3>{l.data.title}</h3>
+                    <p>{l.data.description} · {l.data.minutes} min</p>
+                  </div>
+                </a>
+              ) : (
+                <div class="lesson-card draft">
+                  <span class="num">{l.data.order}</span>
+                  <div>
+                    <h3>
+                      {l.data.title}
+                      <span class="tag">Coming soon</span>
+                    </h3>
+                    <p>{l.data.description}</p>
+                  </div>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      </section>
+    ))
+  }
+</Base>
+
+<script>
+  import { getCompleted } from '../lib/progress';
+  const done = getCompleted();
+  document.querySelectorAll<HTMLElement>('[data-lesson]').forEach((el) => {
+    if (done.has(el.dataset.lesson!)) {
+      el.classList.add('done');
+      el.querySelector('.num')!.textContent = '✓';
+    }
+  });
+</script>

@@ -1,0 +1,77 @@
+---
+title: "Your first machine-learning model"
+description: "Train, evaluate and interpret a model with scikit-learn, and learn why the test set is sacred."
+module: "Machine learning"
+order: 4
+minutes: 25
+status: ready
+---
+import PyCell from '../../components/PyCell.astro';
+
+A model learns a mapping from **features** (inputs) to a **target** (what you want to predict). The single most important habit: **evaluate on data the model never saw during training.**
+
+## Prepare the data
+
+We'll reuse the idea from the last lesson: predict rent from size and distance. (Each page has its own Python session, so we regenerate the data here.)
+
+<PyCell code={`
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
+rng = np.random.default_rng(seed=7)
+n = 500
+X = pd.DataFrame({
+    "size_m2": rng.normal(70, 20, n).clip(25, 160),
+    "distance_km": rng.exponential(5, n),
+})
+y = 300 + 14 * X["size_m2"] - 25 * X["distance_km"] + rng.normal(0, 120, n)
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=0)
+print(f"train: {len(X_train)} rows, test: {len(X_test)} rows")
+`} />
+
+## Baseline first
+
+Before any model, ask: *how good is a dumb guess?* Predicting the training mean for everyone gives us a bar to beat.
+
+<PyCell code={`
+from sklearn.metrics import mean_absolute_error
+
+baseline_pred = np.full(len(y_test), y_train.mean())
+baseline_mae = mean_absolute_error(y_test, baseline_pred)
+print(f"Baseline MAE: {baseline_mae:.0f}")
+`} />
+
+## Fit a model
+
+<PyCell code={`
+from sklearn.linear_model import LinearRegression
+
+model = LinearRegression().fit(X_train, y_train)
+pred = model.predict(X_test)
+mae = mean_absolute_error(y_test, pred)
+print(f"Linear regression MAE: {mae:.0f}  (baseline {baseline_mae:.0f})")
+print("Coefficients:", dict(zip(X.columns, model.coef_.round(1))))
+`} />
+
+The learned coefficients should be close to the true ones we used to simulate (14 per m², -25 per km). That's the advantage of synthetic data when learning: you can verify that the method works.
+
+## Exercise: try a more flexible model
+
+Fit a `RandomForestRegressor` (from `sklearn.ensemble`, with `random_state=0`) on the training data, and store its **test MAE** in `rf_mae`. Does more flexibility help when the true relationship is linear?
+
+<PyCell
+  code={`
+from sklearn.ensemble import RandomForestRegressor
+
+rf_mae = ...
+rf_mae
+`}
+  check={`
+assert not isinstance(rf_mae, type(...)), "replace ... with the forest's test MAE"
+assert 0 < float(rf_mae) < baseline_mae, "rf_mae should be the forest's MAE on X_test/y_test, and should beat the baseline"
+`}
+/>
+
+> **What's next:** cross-validation, feature engineering, gradient boosting and, for unstructured data, starting from pretrained foundation models instead of training from scratch.
