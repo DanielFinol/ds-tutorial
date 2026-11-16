@@ -1,0 +1,242 @@
+---
+title: "Regression for business questions"
+description: "Use statsmodels to answer 'how much, holding the rest equal?': adjusted differences, percentage effects, odds ratios, marginal effects and interactions."
+module: "Analysis and experiments"
+order: 8
+minutes: 35
+tools: ["statsmodels", "pandas"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+Most questions can't be A/B tested: you can't randomly assign membership or a bad delivery. The everyday tool for "how much does X matter, holding other things equal" is a regression you can **read**, not a black-box model. In Python that means **statsmodels** with its formula interface.
+
+The table is one row per recently active customer, as of 1 July 2024, with whether they `churned` (placed no order in the following 90 days).
+
+<PyCell code={`
+import dsw
+import numpy as np
+import pandas as pd
+import statsmodels.formula.api as smf
+
+cust = dsw.churn_snapshot("2024-07-01")
+cust["churned"] = cust["churned"].astype(int)
+cust["had_bad_ticket"] = cust["neg_tickets_180d"] > 0
+print(cust.shape)
+cust[["customer_id", "plus_member", "channel", "device", "tenure_days", "spend_365d", "had_bad_ticket", "churned"]].head()
+`} />
+
+## How much more do members spend?
+
+> **Finance:** For the membership business case: how much more does a Plus member spend per year than a non-member?
+
+The raw comparison is one line, and it's the wrong answer: members also differ in tenure, channel and device, all of which affect spend.
+
+<PyCell code={`
+raw = cust.groupby("plus_member")["spend_365d"].agg(["mean", "median", "count"]).round(1)
+print(raw, "\\n\\nraw difference in means:", round(raw.loc[True, "mean"] - raw.loc[False, "mean"], 1))
+`} />
+
+A formula names the outcome on the left and the predictors on the right. `C(...)` marks a categorical. Spend is skewed and its variance grows with its level, so ask for **robust standard errors** (`cov_type="HC3"`); make that your default for business data.
+
+<PyCell code={`
+m0 = smf.ols("spend_365d ~ plus_member + tenure_days", data=cust).fit(cov_type="HC3")
+print(m0.summary().tables[1])
+`} />
+
+How to read a row: *holding tenure fixed, members spend about that many dollars more per year*, with the 95% interval in the last two columns.
+
+**1.** Fit `m1`, which also adjusts for acquisition `channel` and `device` (both categorical), with HC3 errors. Extract the membership coefficient into `plus_coef` and its 95% interval into `plus_low`, `plus_high`.
+
+<PyCell
+  code={`
+m1 = ...
+
+plus_coef = ...
+plus_low, plus_high = ..., ...
+print(f"adjusted member effect: \${plus_coef:,.0f} per year (95% CI \${plus_low:,.0f} to \${plus_high:,.0f})")
+`}
+  check={`
+_m = smf.ols("spend_365d ~ plus_member + tenure_days + C(channel) + C(device)", data=cust).fit(cov_type="HC3")
+_k = "plus_member[T.True]"
+assert not isinstance(plus_coef, type(...)), "replace the ... placeholders"
+assert abs(plus_coef - _m.params[_k]) < 0.01, "plus_coef = m1.params['plus_member[T.True]'] from spend_365d ~ plus_member + tenure_days + C(channel) + C(device)"
+assert abs(plus_low - _m.conf_int().loc[_k, 0]) < 0.01 and abs(plus_high - _m.conf_int().loc[_k, 1]) < 0.01, "interval = m1.conf_int().loc['plus_member[T.True]'] with cov_type='HC3'"
+`}
+  hint="`smf.ols('spend_365d ~ plus_member + tenure_days + C(channel) + C(device)', data=cust).fit(cov_type='HC3')`. Coefficient names are in `m1.params.index`; the member one is `'plus_member[T.True]'`."
+  solution={`
+m1 = smf.ols("spend_365d ~ plus_member + tenure_days + C(channel) + C(device)", data=cust).fit(cov_type="HC3")
+
+plus_coef = m1.params["plus_member[T.True]"]
+plus_low, plus_high = m1.conf_int().loc["plus_member[T.True]"]
+print(f"adjusted member effect: \${plus_coef:,.0f} per year (95% CI \${plus_low:,.0f} to \${plus_high:,.0f})")
+`}
+/>
+
+The adjusted figure is well below the raw gap: part of the raw difference was simply that members have been customers for longer.
+
+## Percentage effects with a log outcome
+
+Finance usually thinks in percentages, and skewed money variables behave better on a log scale. With `np.log1p(y)` as the outcome, a coefficient `b` means the outcome is multiplied by `exp(b)`: a change of `exp(b) - 1` in percentage terms.
+
+**2.** Fit `m2`: the same predictors as `m1`, outcome `np.log1p(spend_365d)`, HC3 errors. Store the member effect as a proportion in `plus_pct` (for example 0.25 for +25%).
+
+<PyCell
+  code={`
+m2 = ...
+plus_pct = ...
+print(f"members spend {plus_pct:+.0%} more, other things equal")
+`}
+  check={`
+_m = smf.ols("np.log1p(spend_365d) ~ plus_member + tenure_days + C(channel) + C(device)", data=cust).fit(cov_type="HC3")
+assert not isinstance(plus_pct, type(...)), "replace the ... placeholders"
+_b = _m.params["plus_member[T.True]"]
+assert abs(plus_pct - _b) > 1e-6, "that's the raw log coefficient: convert it with np.exp(b) - 1"
+assert abs(plus_pct - (np.exp(_b) - 1)) < 1e-6, "plus_pct = np.exp(m2.params['plus_member[T.True]']) - 1"
+`}
+  hint="Formulas accept functions: `'np.log1p(spend_365d) ~ plus_member + tenure_days + C(channel) + C(device)'`. Then `np.exp(coef) - 1`."
+  solution={`
+m2 = smf.ols("np.log1p(spend_365d) ~ plus_member + tenure_days + C(channel) + C(device)", data=cust).fit(cov_type="HC3")
+plus_pct = np.exp(m2.params["plus_member[T.True]"]) - 1
+print(f"members spend {plus_pct:+.0%} more, other things equal")
+`}
+/>
+
+> **What you may and may not claim.** "Members spend about that much more than comparable non-members" is supported. "Membership *causes* that spend" is not: customers who expected to shop a lot were the ones who joined. Regression adjusts only for what is in the model. Say so in the write-up, and propose an experiment (a discounted trial offered at random) if the causal number matters.
+
+## Binary outcomes: logistic regression
+
+> **Customer Experience:** How much does a bad support experience (a late, damaged or refunded order ticket) raise the chance a customer churns?
+
+For a yes/no outcome use `smf.logit`. Coefficients are in log-odds; `np.exp` turns them into **odds ratios**.
+
+<PyCell code={`
+print(cust.groupby("had_bad_ticket")["churned"].agg(["mean", "count"]).round(3), "\\n")
+
+logit = smf.logit("churned ~ had_bad_ticket + recency_days + orders_365d + plus_member + C(channel)", data=cust).fit(disp=0)
+print(logit.summary().tables[1])
+`} />
+
+**3.** Build `odds`: a DataFrame indexed by coefficient name with columns `odds_ratio`, `low` and `high` (the exponentiated coefficient and 95% interval), for the model `logit` above.
+
+<PyCell
+  code={`
+odds = ...
+odds.round(3)
+`}
+  check={`
+_e = np.exp(pd.concat([logit.params.rename("odds_ratio"), logit.conf_int().rename(columns={0: "low", 1: "high"})], axis=1))
+assert isinstance(odds, pd.DataFrame), "odds should be a DataFrame"
+assert {"odds_ratio", "low", "high"} <= set(odds.columns), f"columns should include odds_ratio, low, high; got {list(odds.columns)}"
+assert np.allclose(odds.loc[_e.index, ["odds_ratio", "low", "high"]].to_numpy(), _e.to_numpy()), "exponentiate logit.params and logit.conf_int()"
+`}
+  hint="`ci = logit.conf_int()` has columns 0 and 1. `np.exp(pd.DataFrame({'odds_ratio': logit.params, 'low': ci[0], 'high': ci[1]}))`."
+  solution={`
+ci = logit.conf_int()
+odds = np.exp(pd.DataFrame({"odds_ratio": logit.params, "low": ci[0], "high": ci[1]}))
+odds.round(3)
+`}
+/>
+
+Odds ratios are hard to explain in a meeting ("23% higher odds" is *not* "23% more likely"). **Average marginal effects** translate each coefficient into percentage points of probability, which is what stakeholders actually want:
+
+<PyCell code={`
+ame = logit.get_margeff().summary_frame()[["dy/dx", "Conf. Int. Low", "Cont. Int. Hi."]]
+(ame * 100).round(2).rename(columns={"dy/dx": "effect (pp)", "Conf. Int. Low": "low (pp)", "Cont. Int. Hi.": "high (pp)"})
+`} />
+
+A sentence for the CX team: *customers with a bad-experience ticket are about four points more likely to churn than comparable customers without one; the interval runs from roughly zero to eight points, so the effect is real but not precisely known.* (Compare the raw gap you printed above: two points. Adjustment moved it, as it often does.)
+
+## Does the effect differ between groups? Interactions
+
+CX suspects a bad experience hurts **non-members** more than members. That's an interaction: `a * b` in a formula expands to `a + b + a:b`.
+
+<PyCell code={`
+inter = smf.logit("churned ~ had_bad_ticket * plus_member + recency_days + orders_365d", data=cust).fit(disp=0)
+print(inter.summary().tables[1])
+`} />
+
+Interaction coefficients are nearly impossible to read directly. **Predict for concrete profiles instead.**
+
+**4.** Build `profiles`: four rows covering every combination of `had_bad_ticket` and `plus_member` (in the order False/False, True/False, False/True, True/True), with `recency_days` and `orders_365d` fixed at their medians in `cust`. Add a column `p_churn` with the model's predicted churn probability.
+
+<PyCell
+  code={`
+profiles = pd.DataFrame({
+    "had_bad_ticket": [False, True, False, True],
+    "plus_member": [False, False, True, True],
+    # add recency_days and orders_365d at their medians
+})
+profiles["p_churn"] = ...
+profiles.round(3)
+`}
+  check={`
+_p = pd.DataFrame({"had_bad_ticket": [False, True, False, True], "plus_member": [False, False, True, True], "recency_days": cust["recency_days"].median(), "orders_365d": cust["orders_365d"].median()})
+_e = inter.predict(_p).to_numpy()
+assert "p_churn" in profiles.columns and len(profiles) == 4, "profiles needs 4 rows and a p_churn column"
+assert not isinstance(profiles["p_churn"].iloc[0], type(...)), "replace the ... placeholder with inter.predict(profiles)"
+assert np.allclose(profiles["p_churn"].to_numpy(dtype=float), _e, atol=1e-6), "p_churn = inter.predict(profiles) with recency_days and orders_365d set to cust medians"
+`}
+  hint="Add `'recency_days': cust['recency_days'].median()` and `'orders_365d': cust['orders_365d'].median()` to the dict (scalars broadcast), then `inter.predict(profiles)`."
+  solution={`
+profiles = pd.DataFrame({
+    "had_bad_ticket": [False, True, False, True],
+    "plus_member": [False, False, True, True],
+    "recency_days": cust["recency_days"].median(),
+    "orders_365d": cust["orders_365d"].median(),
+})
+profiles["p_churn"] = inter.predict(profiles)
+profiles.round(3)
+`}
+/>
+
+For non-members the bad ticket raises predicted churn by several points; for members it barely moves. But look back at the interaction row in the summary: its interval is wide and includes zero. With only about 150 members who had a bad ticket, the honest statement is *"the data are consistent with members being more resilient, but we can't confirm it yet."* Saying that clearly is worth more than a confident wrong answer.
+
+## Three checks before you send a coefficient
+
+<PyCell code={`
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+X = cust[["orders_90d", "orders_365d", "spend_90d", "spend_365d", "tenure_days"]].assign(const=1.0)
+vif = pd.Series([variance_inflation_factor(X.to_numpy(), i) for i in range(X.shape[1] - 1)], index=X.columns[:-1])
+print("1. Collinearity (VIF above ~5 means that coefficient is unstable):")
+print(vif.round(1).to_string(), "\\n")
+
+print("2. Sample behind each category level:")
+print(cust["channel"].value_counts().to_string(), "\\n")
+
+print("3. Does the sign survive a different specification?")
+for f in ["churned ~ had_bad_ticket", "churned ~ had_bad_ticket + recency_days", "churned ~ had_bad_ticket + recency_days + orders_365d + plus_member + C(channel)"]:
+    b = smf.logit(f, data=cust).fit(disp=0).params["had_bad_ticket[T.True]"]
+    print(f"   {b:+.3f}   {f}")
+`} />
+
+Orders and spend over the same window carry nearly the same information, so don't put both in a model whose coefficients you intend to interpret.
+
+<Lab title="Present a regression to non-statisticians" time="15 min">
+
+Take model `m1` and write the three-line summary Finance needs. No coefficient tables; one sentence per line:
+
+```text
+Finding:    Plus members spend about $X more per year than comparable non-members (95% CI $A to $B).
+Adjusted:   Compared customers with the same tenure, acquisition channel and device.
+Limits:     Not a causal estimate: frequent shoppers choose to join. A randomised trial offer would settle it.
+```
+
+Then make the one chart that supports it: a coefficient plot.
+
+```python
+import matplotlib.pyplot as plt
+
+ci = m1.conf_int().drop("Intercept")
+coefs = m1.params.drop("Intercept")
+fig, ax = plt.subplots(figsize=(7, 3.5))
+ax.errorbar(coefs, range(len(coefs)), xerr=[coefs - ci[0], ci[1] - coefs], fmt="o")
+ax.axvline(0, color="grey", lw=1)
+ax.set_yticks(range(len(coefs)), coefs.index)
+ax.set_xlabel("Difference in yearly spend, $ (95% CI)")
+```
+
+`tenure_days` will look like zero next to the others because its unit is one day. Rescale it to years in the formula (`I(tenure_days / 365)`) and redraw. Units are the most common reason a coefficient chart misleads.
+
+</Lab>

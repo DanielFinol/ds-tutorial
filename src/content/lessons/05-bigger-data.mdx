@@ -1,0 +1,310 @@
+---
+title: "Bigger data: Parquet, DuckDB and Polars"
+description: "What to do when pandas is too slow or the data doesn't fit in memory: columnar files, SQL over files, and the Polars expression API."
+module: "Working with data"
+order: 5
+minutes: 35
+tools: ["Parquet", "DuckDB", "Polars"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+pandas loads a whole table into memory and works on one CPU core. That's fine up to a few million rows. Beyond that, today's standard answers, in the order you should reach for them:
+
+1. **Do the heavy lifting where the data lives**: aggregate in the warehouse with SQL and pull only the result.
+2. **Store data as Parquet** and read only the columns and rows you need.
+3. **Query files with DuckDB**, which streams through data larger than memory.
+4. **Use Polars** when you want DataFrame code that is multi-threaded and lazily optimised.
+
+Bramble's tables are small, so everything here runs instantly, but the code is exactly what you'd write for a 100 GB dataset.
+
+<PyCell code={`
+import os
+import dsw
+import pandas as pd
+
+paths = dsw.export("data")
+for p in paths:
+    print(f"{os.path.getsize(p) / 1024:8.0f} KB  {p}")
+`} />
+
+## Parquet: read less
+
+CSV is text: every read parses every character of every column, and types are guessed. **Parquet** is columnar, typed and compressed, so a reader can skip columns entirely and skip row groups whose min/max statistics rule them out.
+
+<PyCell code={`
+orders = pd.read_parquet("data/orders.parquet")
+orders.to_csv("data/orders.csv", index=False)
+
+print(f"CSV:     {os.path.getsize('data/orders.csv') / 1024:6.0f} KB")
+print(f"Parquet: {os.path.getsize('data/orders.parquet') / 1024:6.0f} KB")
+print(pd.read_csv("data/orders.csv").dtypes["order_ts"], "<- CSV forgot this was a timestamp")
+print(pd.read_parquet("data/orders.parquet").dtypes["order_ts"], "<- Parquet remembers")
+`} />
+
+**1.** Load into `dec` only the columns `order_id`, `customer_id` and `total` for **completed orders from 1 December 2024 onward**, without reading the rest of the file. `pd.read_parquet` takes `columns=` and `filters=` (a list of `(column, operator, value)` tuples that are pushed down into the file reader).
+
+<PyCell
+  code={`
+dec = pd.read_parquet(
+    "data/orders.parquet",
+    # columns=..., filters=...
+)
+print(dec.shape)
+dec.head(3)
+`}
+  check={`
+_o = pd.read_parquet("data/orders.parquet")
+_e = _o[(_o["status"] == "completed") & (_o["order_ts"] >= "2024-12-01")]
+assert list(dec.columns) == ["order_id", "customer_id", "total"], f"columns should be exactly order_id, customer_id, total; got {list(dec.columns)}"
+assert len(dec) == len(_e), f"expected {len(_e)} rows, got {len(dec)}: filter on status and order_ts"
+assert abs(dec["total"].sum() - _e["total"].sum()) < 0.01
+`}
+  hint="`columns=['order_id', 'customer_id', 'total']` and `filters=[('status', '==', 'completed'), ('order_ts', '>=', pd.Timestamp('2024-12-01'))]`."
+  solution={`
+dec = pd.read_parquet(
+    "data/orders.parquet",
+    columns=["order_id", "customer_id", "total"],
+    filters=[("status", "==", "completed"), ("order_ts", ">=", pd.Timestamp("2024-12-01"))],
+)
+print(dec.shape)
+dec.head(3)
+`}
+/>
+
+## DuckDB: SQL straight over files
+
+DuckDB treats a file path as a table. Nothing is loaded up front: it reads only the columns the query touches, in parallel, and spills to disk if an intermediate result doesn't fit in memory. Globs (`'data/events/*.parquet'`) read a whole folder as one table.
+
+<PyCell code={`
+import duckdb
+
+duckdb.sql("""
+    SELECT c.country, count(*) AS orders, round(sum(o.total)) AS revenue
+    FROM 'data/orders.parquet' o
+    JOIN 'data/customers.csv' c USING (customer_id)
+    WHERE o.status = 'completed'
+    GROUP BY ALL
+    ORDER BY revenue DESC
+""")
+`} />
+
+`EXPLAIN` shows what the engine will actually do. Look for the **projection** (only needed columns are read) and the **filter** pushed into the Parquet scan:
+
+<PyCell code={`
+plan = duckdb.sql("""
+    EXPLAIN
+    SELECT customer_id, sum(total)
+    FROM 'data/orders.parquet'
+    WHERE status = 'completed' AND order_ts >= TIMESTAMP '2024-12-01'
+    GROUP BY 1
+""").fetchall()[0][1]
+print(plan)
+`} />
+
+**2.** Without loading any file into pandas first, find the **10 customers with the highest completed revenue in 2024**, with their `channel`. Columns: `customer_id`, `channel`, `orders`, `revenue` (rounded to 2 decimals), sorted by revenue, highest first.
+
+<PyCell
+  lang="sql"
+  code={`
+SELECT o.customer_id
+FROM 'data/orders.parquet' o
+JOIN 'data/customers.csv' c USING (customer_id)
+LIMIT 10
+`}
+  check={`
+_e = duckdb.sql("SELECT o.customer_id, c.channel, count(*) AS orders, round(sum(o.total), 2) AS revenue FROM 'data/orders.parquet' o JOIN 'data/customers.csv' c USING (customer_id) WHERE o.status = 'completed' AND o.order_ts >= TIMESTAMP '2024-01-01' AND o.order_ts < TIMESTAMP '2025-01-01' GROUP BY ALL ORDER BY revenue DESC LIMIT 10").df()
+dsw.same(result, _e, ordered=True)
+`}
+  hint="Filter on `o.status = 'completed'` and the 2024 date range, `GROUP BY o.customer_id, c.channel`, `ORDER BY revenue DESC LIMIT 10`."
+  solution={`
+SELECT
+    o.customer_id,
+    c.channel,
+    count(*)               AS orders,
+    round(sum(o.total), 2) AS revenue
+FROM 'data/orders.parquet' o
+JOIN 'data/customers.csv' c USING (customer_id)
+WHERE o.status = 'completed'
+  AND o.order_ts >= TIMESTAMP '2024-01-01' AND o.order_ts < TIMESTAMP '2025-01-01'
+GROUP BY o.customer_id, c.channel
+ORDER BY revenue DESC
+LIMIT 10
+`}
+/>
+
+A common pipeline step is converting a pile of CSVs into Parquet once, then querying that. `COPY` does it without the data ever passing through Python:
+
+<PyCell code={`
+duckdb.sql("""
+    COPY (
+        SELECT *, date_trunc('month', order_ts) AS order_month
+        FROM 'data/orders.csv'
+    ) TO 'data/orders_from_csv.parquet' (FORMAT parquet)
+""")
+duckdb.sql("SELECT order_month, count(*) AS orders FROM 'data/orders_from_csv.parquet' GROUP BY 1 ORDER BY 1 DESC LIMIT 3")
+`} />
+
+## Polars: DataFrames with a query optimiser
+
+Polars is the DataFrame library teams adopt when pandas becomes the bottleneck. Three differences matter in practice:
+
+- **Expressions.** You describe columns with `pl.col("total").sum()` instead of indexing; the same expression works in `select`, `with_columns`, `filter` and `group_by().agg()`.
+- **No index.** Rows are just rows; `group_by` returns ordinary columns.
+- **Lazy execution.** `.lazy()` (or `pl.scan_parquet` on disk) builds a query plan; nothing runs until `.collect()`, and the optimiser prunes columns and pushes filters down first.
+
+<PyCell code={`
+import polars as pl
+
+# In the browser we read through pyarrow; on your machine use pl.scan_parquet("data/orders.parquet").
+orders_pl = pl.read_parquet("data/orders.parquet", use_pyarrow=True)
+customers_pl = pl.read_csv("data/customers.csv", try_parse_dates=True)
+
+monthly = (
+    orders_pl.lazy()
+    .filter(pl.col("status") == "completed")
+    .group_by(pl.col("order_ts").dt.truncate("1mo").alias("month"))
+    .agg(
+        pl.len().alias("orders"),
+        pl.col("total").sum().round(2).alias("revenue"),
+        pl.col("total").median().alias("median_order"),
+    )
+    .sort("month")
+)
+print(monthly.explain())   # the optimised plan: note the filter and the three columns it needs
+monthly.collect().tail(3)
+`} />
+
+The pandas-to-Polars phrasebook for the operations you already know:
+
+| pandas | Polars |
+| --- | --- |
+| `df[df.total > 100]` | `df.filter(pl.col("total") > 100)` |
+| `df.assign(x=df.a * 2)` | `df.with_columns((pl.col("a") * 2).alias("x"))` |
+| `df.groupby("k").agg(n=("id", "count"))` | `df.group_by("k").agg(pl.len().alias("n"))` |
+| `df.groupby("k")["v"].transform("sum")` | `pl.col("v").sum().over("k")` |
+| `df.merge(other, on="k", how="left")` | `df.join(other, on="k", how="left")` |
+| `df.sort_values("v", ascending=False)` | `df.sort("v", descending=True)` |
+| `np.where(cond, a, b)` | `pl.when(cond).then(a).otherwise(b)` |
+
+**3.** Write this one in Polars and store the collected result in `by_device`: for **completed** orders, per `device`, the number of orders (`orders`), total revenue (`revenue`) and the share of orders that used a discount (`discount_share`), sorted by `revenue`, highest first.
+
+<PyCell
+  code={`
+by_device = (
+    orders_pl.lazy()
+    # .filter(...).group_by(...).agg(...).sort(...)
+    .collect()
+)
+by_device
+`}
+  check={`
+_c = pd.read_parquet("data/orders.parquet").query("status == 'completed'")
+_e = _c.assign(d=_c["discount_pct"] > 0).groupby("device").agg(orders=("order_id", "count"), revenue=("total", "sum"), discount_share=("d", "mean")).sort_values("revenue", ascending=False).reset_index()
+assert isinstance(by_device, pl.DataFrame), "by_device should be a collected Polars DataFrame"
+dsw.same(by_device, _e, ordered=True)
+`}
+  hint="`.filter(pl.col('status') == 'completed').group_by('device').agg(pl.len().alias('orders'), pl.col('total').sum().alias('revenue'), (pl.col('discount_pct') > 0).mean().alias('discount_share')).sort('revenue', descending=True)`"
+  solution={`
+by_device = (
+    orders_pl.lazy()
+    .filter(pl.col("status") == "completed")
+    .group_by("device")
+    .agg(
+        pl.len().alias("orders"),
+        pl.col("total").sum().alias("revenue"),
+        (pl.col("discount_pct") > 0).mean().alias("discount_share"),
+    )
+    .sort("revenue", descending=True)
+    .collect()
+)
+by_device
+`}
+/>
+
+**4.** Window expressions use `.over(...)`. Build `first_orders`: one row per customer with their **first completed order**, with columns `customer_id`, `order_ts`, `total` and `channel` (joined from `customers_pl`), sorted by `customer_id`.
+
+<PyCell
+  code={`
+first_orders = (
+    orders_pl.lazy()
+    .filter(pl.col("status") == "completed")
+    # keep each customer's earliest order, join the channel, select and sort
+    .collect()
+)
+first_orders.head()
+`}
+  check={`
+_c = pd.read_parquet("data/orders.parquet").query("status == 'completed'").sort_values("order_ts")
+_e = _c.groupby("customer_id").head(1).merge(pd.read_csv("data/customers.csv")[["customer_id", "channel"]], on="customer_id")[["customer_id", "order_ts", "total", "channel"]].sort_values("customer_id")
+assert isinstance(first_orders, pl.DataFrame), "first_orders should be a collected Polars DataFrame"
+assert first_orders.height == len(_e), f"expected one row per customer with a completed order ({len(_e)}), got {first_orders.height}"
+dsw.same(first_orders, _e, ordered=True)
+`}
+  hint="`.filter(pl.col('order_ts') == pl.col('order_ts').min().over('customer_id'))`, then `.join(customers_pl.lazy().select('customer_id', 'channel'), on='customer_id')`, `.select(...)`, `.sort('customer_id')`."
+  solution={`
+first_orders = (
+    orders_pl.lazy()
+    .filter(pl.col("status") == "completed")
+    .filter(pl.col("order_ts") == pl.col("order_ts").min().over("customer_id"))
+    .join(customers_pl.lazy().select("customer_id", "channel"), on="customer_id")
+    .select("customer_id", "order_ts", "total", "channel")
+    .sort("customer_id")
+    .collect()
+)
+first_orders.head()
+`}
+/>
+
+## Which tool, when
+
+| Situation | Reach for |
+| --- | --- |
+| Data is in a warehouse | SQL there; pull the aggregate, not the rows |
+| Files up to a few GB, exploratory work, plotting, scikit-learn | pandas (reading Parquet, selected columns) |
+| Files bigger than memory, or you think in SQL | DuckDB over Parquet |
+| Slow pandas pipelines, heavy group-bys and joins, production batch jobs | Polars (lazy) |
+| Hundreds of GB to TB, many machines | Spark or the warehouse; not a laptop problem |
+
+They interoperate through Arrow, so mixing is normal: DuckDB for the big join, pandas for the last mile into a model or a chart.
+
+<Lab title="Feel the difference on 50 million rows" time="20 min">
+
+Generate a file that is uncomfortable for pandas, then race the three engines.
+
+```python
+# make_big.py  ->  uv run python make_big.py
+import duckdb
+duckdb.sql("""
+    COPY (
+        SELECT
+            i AS event_id,
+            (random() * 2e6)::INT AS customer_id,
+            TIMESTAMP '2023-01-01' + INTERVAL (random() * 63072000) SECOND AS ts,
+            ['view', 'cart', 'purchase'][1 + (random() * 2.999)::INT] AS event,
+            round(random() * 200, 2) AS amount
+        FROM range(50000000) t(i)
+    ) TO 'events.parquet' (FORMAT parquet)
+""")
+```
+
+```python
+import time, duckdb, pandas as pd, polars as pl
+
+t = time.perf_counter()
+pd.read_parquet("events.parquet").query("event == 'purchase'").groupby("customer_id")["amount"].sum().nlargest(10)
+print("pandas ", time.perf_counter() - t)
+
+t = time.perf_counter()
+(pl.scan_parquet("events.parquet").filter(pl.col("event") == "purchase")
+   .group_by("customer_id").agg(pl.col("amount").sum()).top_k(10, by="amount").collect())
+print("polars ", time.perf_counter() - t)
+
+t = time.perf_counter()
+duckdb.sql("SELECT customer_id, sum(amount) s FROM 'events.parquet' WHERE event = 'purchase' GROUP BY 1 ORDER BY s DESC LIMIT 10").fetchall()
+print("duckdb ", time.perf_counter() - t)
+```
+
+Watch memory in your system monitor while each runs. Then make pandas competitive with `columns=` and `filters=` from exercise 1, and note how much of the gap was simply *reading less*.
+
+</Lab>

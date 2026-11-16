@@ -1,0 +1,304 @@
+---
+title: "Analysis that answers the question"
+description: "Skewed metrics, segment comparisons, cohort retention, explaining a change, and charts a stakeholder can read in five seconds."
+module: "Analysis and experiments"
+order: 6
+minutes: 40
+tools: ["pandas", "matplotlib"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+Exploratory analysis at work is rarely open-ended. Someone has a question; you have a few hours. This lesson practises the five analyses that cover most such requests.
+
+<PyCell code={`
+import dsw
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+customers = dsw.load("customers")
+orders = dsw.load("orders")
+order_items = dsw.load("order_items")
+products = dsw.load("products")
+completed = orders[orders["status"] == "completed"]
+`} />
+
+## 1. Summarise a skewed metric honestly
+
+Money, durations and counts are right-skewed. A mean alone misleads: a few large orders drag it far above what a typical customer does. Report the **median and a high percentile** next to it, and plot on a log scale.
+
+<PyCell code={`
+t = completed["total"]
+print(f"mean {t.mean():.0f}   median {t.median():.0f}   p90 {t.quantile(0.9):.0f}   max {t.max():.0f}")
+
+fig, axes = plt.subplots(1, 2, figsize=(9, 3))
+axes[0].hist(t, bins=60)
+axes[0].set(title="Order value: linear scale", xlabel="order total")
+axes[1].hist(t, bins=np.logspace(np.log10(t.min()), np.log10(t.max()), 60))
+axes[1].set(xscale="log", title="Same data: log scale", xlabel="order total (log)")
+fig.tight_layout()
+`} />
+
+**1.** *Do Plus members place bigger orders?* Build `aov`: one row per `plus_member` value with `orders` (count), `mean`, `median` and `p90` of completed order totals.
+
+<PyCell
+  code={`
+with_plus = completed.merge(customers[["customer_id", "plus_member"]], on="customer_id", validate="many_to_one")
+
+aov = ...
+aov.round(2)
+`}
+  check={`
+_w = orders[orders["status"] == "completed"].merge(customers[["customer_id", "plus_member"]], on="customer_id")
+_e = _w.groupby("plus_member")["total"].agg(orders="count", mean="mean", median="median", p90=lambda s: s.quantile(0.9)).reset_index()
+assert not isinstance(aov, type(...)), "replace the ... placeholder"
+dsw.same(aov, _e)
+`}
+  hint="`with_plus.groupby('plus_member')['total'].agg(orders='count', mean='mean', median='median', p90=lambda s: s.quantile(0.9))`"
+  solution={`
+with_plus = completed.merge(customers[["customer_id", "plus_member"]], on="customer_id", validate="many_to_one")
+
+aov = with_plus.groupby("plus_member")["total"].agg(
+    orders="count", mean="mean", median="median", p90=lambda s: s.quantile(0.9)
+)
+aov.round(2)
+`}
+/>
+
+Per order, members and non-members look the same. Members are more valuable because they order more *often*: "bigger" is true per customer, not per order. Getting the unit of analysis right is half of most answers.
+
+## 2. Compare segments with their sample sizes
+
+A rate without its denominator is a rumour. Always carry `n`, and prefer an interval to a bare percentage when segments are small.
+
+<PyCell code={`
+def rate_table(df, by, flag):
+    out = df.groupby(by)[flag].agg(n="count", rate="mean")
+    se = np.sqrt(out["rate"] * (1 - out["rate"]) / out["n"])
+    return out.assign(low=out["rate"] - 1.96 * se, high=out["rate"] + 1.96 * se)
+
+orders_c = orders.merge(customers[["customer_id", "country", "channel"]], on="customer_id", validate="many_to_one")
+orders_c["refunded"] = orders_c["status"] == "refunded"
+rate_table(orders_c, "country", "refunded").round(4)
+`} />
+
+The intervals overlap heavily: there is no evidence here that any country has a refund problem, whatever the ranking suggests.
+
+**2.** Refunds by *product category* need item-level data. Build `cat_refunds` with one row per `category`: `n` (number of order lines) and `rate` (share of lines belonging to a refunded order), sorted by `rate`, highest first.
+
+<PyCell
+  code={`
+lines = (
+    order_items
+    .merge(orders[["order_id", "status"]], on="order_id", validate="many_to_one")
+    .merge(products[["product_id", "category"]], on="product_id", validate="many_to_one")
+)
+
+cat_refunds = ...
+cat_refunds.round(4)
+`}
+  check={`
+_l = order_items.merge(orders[["order_id", "status"]], on="order_id").merge(products[["product_id", "category"]], on="product_id")
+_e = _l.assign(r=_l["status"] == "refunded").groupby("category")["r"].agg(n="count", rate="mean").sort_values("rate", ascending=False).reset_index()
+assert not isinstance(cat_refunds, type(...)), "replace the ... placeholder"
+dsw.same(cat_refunds, _e, ordered=True)
+`}
+  hint="Add a boolean column with `.assign(refunded=lambda d: d['status'] == 'refunded')`, then `.groupby('category')['refunded'].agg(n='count', rate='mean').sort_values('rate', ascending=False)`."
+  solution={`
+lines = (
+    order_items
+    .merge(orders[["order_id", "status"]], on="order_id", validate="many_to_one")
+    .merge(products[["product_id", "category"]], on="product_id", validate="many_to_one")
+)
+
+cat_refunds = (
+    lines.assign(refunded=lambda d: d["status"] == "refunded")
+    .groupby("category")["refunded"]
+    .agg(n="count", rate="mean")
+    .sort_values("rate", ascending=False)
+)
+cat_refunds.round(4)
+`}
+/>
+
+## 3. Cohort retention
+
+"Are newer customers sticking around as well as older ones?" is answered with a cohort table: rows are signup months, columns are months since signup, cells are the share of the cohort that ordered in that month.
+
+<PyCell code={`
+c = completed.merge(customers[["customer_id", "signup_date"]], on="customer_id", validate="many_to_one")
+c["cohort"] = c["signup_date"].dt.to_period("M")
+c["month_n"] = (c["order_ts"].dt.to_period("M") - c["cohort"]).apply(lambda d: d.n)
+
+cohort_size = customers["signup_date"].dt.to_period("M").value_counts().sort_index()
+c[["customer_id", "cohort", "order_ts", "month_n"]].head(4)
+`} />
+
+**3.** Build `retention`: index = `cohort` (signup month) for cohorts **2024-01 to 2024-06**, columns = `month_n` 0 to 5, values = share of the cohort's customers with at least one completed order in that month.
+
+Divide by the full cohort size (`cohort_size`), not by the number who ordered in month 0.
+
+<PyCell
+  code={`
+active = (
+    c[(c["cohort"] >= "2024-01") & (c["cohort"] <= "2024-06") & (c["month_n"] <= 5)]
+    .groupby(["cohort", "month_n"])["customer_id"]
+    .nunique()
+    .unstack()
+)
+
+retention = ...
+retention.round(3)
+`}
+  check={`
+_c = orders[orders["status"] == "completed"].merge(customers[["customer_id", "signup_date"]], on="customer_id")
+_c["cohort"] = _c["signup_date"].dt.to_period("M")
+_c["month_n"] = (_c["order_ts"].dt.to_period("M") - _c["cohort"]).apply(lambda d: d.n)
+_a = _c[(_c["cohort"] >= "2024-01") & (_c["cohort"] <= "2024-06") & (_c["month_n"] <= 5)].groupby(["cohort", "month_n"])["customer_id"].nunique().unstack()
+_e = _a.div(customers["signup_date"].dt.to_period("M").value_counts().sort_index().reindex(_a.index), axis=0)
+assert isinstance(retention, pd.DataFrame) and retention.shape == (6, 6), f"retention should be a 6x6 DataFrame, got {getattr(retention, 'shape', type(retention))}"
+assert retention.max().max() <= 1, "values should be shares between 0 and 1"
+assert np.allclose(retention.to_numpy(), _e.to_numpy()), "values differ: divide each row of active by that cohort's size, e.g. active.div(cohort_size.reindex(active.index), axis=0)"
+`}
+  hint="`active.div(cohort_size.reindex(active.index), axis=0)` divides each row by its cohort's size."
+  solution={`
+active = (
+    c[(c["cohort"] >= "2024-01") & (c["cohort"] <= "2024-06") & (c["month_n"] <= 5)]
+    .groupby(["cohort", "month_n"])["customer_id"]
+    .nunique()
+    .unstack()
+)
+
+retention = active.div(cohort_size.reindex(active.index), axis=0)
+retention.round(3)
+`}
+/>
+
+<PyCell code={`
+fig, ax = plt.subplots(figsize=(7, 3.2))
+im = ax.imshow(retention.to_numpy(), cmap="Greens", vmin=0, vmax=0.8, aspect="auto")
+ax.set(xticks=range(6), yticks=range(6), yticklabels=retention.index.astype(str),
+       xlabel="months since signup", title="Share of cohort ordering each month")
+for (i, j), v in np.ndenumerate(retention.to_numpy()):
+    ax.text(j, i, f"{v:.0%}", ha="center", va="center", fontsize=9)
+ax.grid(False)
+`} />
+
+Read it down the columns: if month-2 retention falls from cohort to cohort, newer customers are weaker. (Also note the last cell of each recent cohort would be incomplete if the data ended mid-month: always check that the window is fully observed.)
+
+## 4. Explain a change
+
+> **Priya:** November revenue was way up on October. Was that more orders or bigger baskets?
+
+Revenue = orders × average order value, so a change splits exactly into a volume effect and a value effect.
+
+<PyCell code={`
+m = (
+    completed.assign(month=completed["order_ts"].dt.to_period("M"))
+    .groupby("month")
+    .agg(orders=("order_id", "count"), revenue=("total", "sum"), discounted=("discount_pct", lambda s: (s > 0).mean()))
+    .assign(aov=lambda d: d["revenue"] / d["orders"])
+    .loc["2024-10":"2024-11"]
+)
+m.round(2)
+`} />
+
+**4.** Using the two rows of `m` (October = `old`, November = `new`), compute `volume_effect` = (change in orders) × old AOV, and `value_effect` = (change in AOV) × new orders. Together they must equal the revenue change.
+
+<PyCell
+  code={`
+old, new = m.iloc[0], m.iloc[1]
+
+volume_effect = ...
+value_effect = ...
+
+print(f"revenue change {new['revenue'] - old['revenue']:,.0f} = volume {volume_effect:,.0f} + value {value_effect:,.0f}")
+`}
+  check={`
+_o, _n = m.iloc[0], m.iloc[1]
+assert not isinstance(volume_effect, type(...)), "replace the ... placeholders"
+assert abs(volume_effect - (_n["orders"] - _o["orders"]) * _o["aov"]) < 0.01, "volume_effect = (new orders - old orders) * old aov"
+assert abs(value_effect - (_n["aov"] - _o["aov"]) * _n["orders"]) < 0.01, "value_effect = (new aov - old aov) * new orders"
+assert abs(volume_effect + value_effect - (_n["revenue"] - _o["revenue"])) < 0.01, "the two effects should add up to the revenue change"
+`}
+  hint="`(new['orders'] - old['orders']) * old['aov']` and `(new['aov'] - old['aov']) * new['orders']`."
+  solution={`
+old, new = m.iloc[0], m.iloc[1]
+
+volume_effect = (new["orders"] - old["orders"]) * old["aov"]
+value_effect = (new["aov"] - old["aov"]) * new["orders"]
+
+print(f"revenue change {new['revenue'] - old['revenue']:,.0f} = volume {volume_effect:,.0f} + value {value_effect:,.0f}")
+`}
+/>
+
+The answer for Priya: November grew entirely through **more orders**; baskets actually got cheaper, because the share of discounted orders jumped (Black Friday). That is a one-sentence finding with a number attached, which is what she can use.
+
+## 5. A chart for a slide
+
+A default chart shows data. A presentation chart makes one point: the **title states the finding**, bars are sorted, values are labelled directly, and everything that isn't data is removed.
+
+<PyCell code={`
+cat_rev = (
+    order_items.merge(completed[["order_id"]], on="order_id")
+    .merge(products[["product_id", "category"]], on="product_id")
+    .assign(revenue=lambda d: d["quantity"] * d["unit_price"])
+    .groupby("category")["revenue"].sum()
+)
+
+ax = cat_rev.plot.bar(figsize=(7, 3))   # the default: unsorted, vertical labels, no message
+`} />
+
+**5.** Redraw it for a slide. Requirements (the check inspects your `ax`): a **horizontal** bar chart with the **largest category at the top**, a title that states a finding, an x-axis label with the unit, and a value label on every bar.
+
+<PyCell
+  code={`
+ranked = cat_rev.sort_values()          # ascending: barh draws the last row at the top
+
+fig, ax = plt.subplots(figsize=(7, 3.6))
+bars = ax.barh(ranked.index, ranked / 1e6)
+# title, axis label, value labels (ax.bar_label), remove the grid
+`}
+  check={`
+_w = [p.get_width() for p in ax.patches]
+assert len(_w) == 8 and all(p.get_height() < 1 for p in ax.patches), "draw 8 horizontal bars with ax.barh"
+assert _w == sorted(_w), "sort the bars so the largest category is at the top (ascending order for barh)"
+assert len(ax.get_title(loc="left") or ax.get_title()) >= 15, "give the chart a title that states the finding (a full sentence, not 'Revenue by category')"
+assert ax.get_xlabel().strip(), "label the x-axis with what is measured and its unit"
+assert len(ax.texts) >= 8, "add a value label to every bar with ax.bar_label(bars, fmt=...)"
+`}
+  hint="`ax.set_title('Outdoor and Lighting bring in over half of revenue', loc='left')`, `ax.set_xlabel('Revenue, $ million')`, `ax.bar_label(bars, fmt='%.1f', padding=3)`, `ax.grid(False)`."
+  solution={`
+ranked = cat_rev.sort_values()          # ascending: barh draws the last row at the top
+
+fig, ax = plt.subplots(figsize=(7, 3.6))
+bars = ax.barh(ranked.index, ranked / 1e6)
+top2 = ranked.iloc[-2:].sum() / ranked.sum()
+ax.set_title(f"{ranked.index[-1]} and {ranked.index[-2]} bring in {top2:.0%} of revenue", loc="left")
+ax.set_xlabel("Revenue from completed orders, $ million")
+ax.bar_label(bars, fmt="%.1f", padding=3)
+ax.grid(False)
+ax.spines["bottom"].set_visible(False)
+ax.set_xticks([])
+`}
+/>
+
+<Lab title="Ship the analysis as a report" time="15 min">
+
+Stakeholders don't open notebooks. Turn yours into a clean HTML page with the code hidden:
+
+```bash
+uv add nbconvert
+uv run jupyter nbconvert --to html --no-input --execute analysis.ipynb --output q4_review.html
+```
+
+Before sending, apply the checklist you'd want from someone else:
+
+1. The first lines state the answer, with numbers, in plain language.
+2. Every chart title is a finding; every table has units and a date range.
+3. Definitions are stated once (what counts as revenue, as an active customer, as a refund).
+4. `Restart kernel and run all` works from a clean checkout, so the numbers are reproducible.
+5. Known limits are listed (missing data, small segments, incomplete periods).
+
+</Lab>

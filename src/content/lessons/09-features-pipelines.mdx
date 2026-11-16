@@ -1,0 +1,293 @@
+---
+title: "Features, leakage and pipelines"
+description: "Build a point-in-time training table from raw events, see what leakage looks like, and package preprocessing and model into one scikit-learn pipeline."
+module: "Predictive modelling"
+order: 9
+minutes: 40
+tools: ["scikit-learn", "pandas"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+In coursework the feature table is handed to you. At work, building it is most of the project, and it's where models quietly go wrong. The next three lessons follow one realistic project:
+
+> **Retention team:** We want to send a win-back offer to customers who are about to stop buying. Can you score everyone by churn risk?
+
+Working definition, agreed with the team: a customer **churns** if they place no completed order in the next 90 days. We score customers who bought at least once in the last 180 days.
+
+<PyCell code={`
+import dsw
+import numpy as np
+import pandas as pd
+
+customers = dsw.load("customers")
+orders = dsw.load("orders")
+completed = orders[orders["status"] == "completed"]
+
+cutoff = pd.Timestamp("2024-07-01")   # "today" for this training example
+`} />
+
+## Point-in-time features
+
+A training row must look exactly like a row at prediction time. Pick a **cutoff date**: features may use only data from *before* it; the label is what happened in the 90 days *after* it.
+
+<PyCell code={`
+past = completed[completed["order_ts"] < cutoff]          # everything we would have known on the cutoff date
+
+feats = past.groupby("customer_id").agg(last_order=("order_ts", "max"), orders_total=("order_id", "count"))
+feats["recency_days"] = (cutoff - feats["last_order"]).dt.days
+feats = feats[feats["recency_days"] <= 180]                # population: bought in the last 180 days
+feats.head()
+`} />
+
+**1.** Add two windowed features to `feats`: `orders_90d` and `spend_90d`, the number and total value of each customer's completed orders in the **90 days before the cutoff**. Customers with none must get 0, not a missing value.
+
+<PyCell
+  code={`
+last_90 = past[past["order_ts"] >= cutoff - pd.Timedelta(days=90)]
+
+feats["orders_90d"] = ...
+feats["spend_90d"] = ...
+feats.head()
+`}
+  check={`
+_s = dsw.churn_snapshot("2024-07-01").set_index("customer_id")
+assert "orders_90d" in feats and "spend_90d" in feats and not isinstance(feats["orders_90d"].iloc[0], type(...)), "replace the ... placeholders"
+assert feats[["orders_90d", "spend_90d"]].notna().all().all(), "customers without orders in the window should get 0, not NaN: add .reindex(feats.index, fill_value=0)"
+assert (feats.loc[_s.index, "orders_90d"] == _s["orders_90d"]).all(), "orders_90d: count of last_90 orders per customer"
+assert np.allclose(feats.loc[_s.index, "spend_90d"], _s["spend_90d"], atol=0.01), "spend_90d: sum of total over last_90 per customer"
+`}
+  hint="`last_90.groupby('customer_id').size().reindex(feats.index, fill_value=0)` and the same pattern with `['total'].sum()`."
+  solution={`
+last_90 = past[past["order_ts"] >= cutoff - pd.Timedelta(days=90)]
+
+feats["orders_90d"] = last_90.groupby("customer_id").size().reindex(feats.index, fill_value=0)
+feats["spend_90d"] = last_90.groupby("customer_id")["total"].sum().reindex(feats.index, fill_value=0)
+feats.head()
+`}
+/>
+
+**2.** Now the label. Add a boolean column `churned` to `feats`: `True` when the customer has **no** completed order from the cutoff up to (not including) 90 days later.
+
+<PyCell
+  code={`
+future = completed[(completed["order_ts"] >= cutoff) & (completed["order_ts"] < cutoff + pd.Timedelta(days=90))]
+
+feats["churned"] = ...
+print(f"{len(feats):,} customers, churn rate {feats['churned'].mean():.1%}")
+`}
+  check={`
+_s = dsw.churn_snapshot("2024-07-01").set_index("customer_id")
+assert "churned" in feats and feats["churned"].dtype == bool, "churned should be a boolean column"
+assert (feats.loc[_s.index, "churned"] == _s["churned"]).all(), "churned = customer_id does NOT appear in future"
+`}
+  hint="`~feats.index.isin(future['customer_id'])`"
+  solution={`
+future = completed[(completed["order_ts"] >= cutoff) & (completed["order_ts"] < cutoff + pd.Timedelta(days=90))]
+
+feats["churned"] = ~feats.index.isin(future["customer_id"])
+print(f"{len(feats):,} customers, churn rate {feats['churned'].mean():.1%}")
+`}
+/>
+
+That pattern (cutoff, windows before, label after) is the whole recipe. `dsw.churn_snapshot(cutoff)` applies it with a dozen more features, including support tickets and refunds. We'll train on the **1 April** snapshot and test on the **1 July** one: an *out-of-time* test, which is how the model will really be used.
+
+<PyCell code={`
+train = dsw.churn_snapshot("2024-04-01")
+test = dsw.churn_snapshot("2024-07-01")
+y_train, y_test = train["churned"], test["churned"]
+
+print(train.shape, test.shape)
+train.head(3).T
+`} />
+
+## What leakage looks like
+
+A feature **leaks** when it contains information that won't exist at prediction time. Suppose a helpful colleague adds "days since the customer's last order", computed from the current orders table rather than as of the cutoff:
+
+<PyCell code={`
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+
+days_since_last = (pd.Timestamp("2025-01-01") - completed.groupby("customer_id")["order_ts"].max()).dt.days
+
+def quick_auc(columns, extra=None):
+    Xtr, Xte = train[columns].copy(), test[columns].copy()
+    if extra is not None:
+        Xtr["extra"], Xte["extra"] = train["customer_id"].map(extra), test["customer_id"].map(extra)
+    model = LogisticRegression(max_iter=2000).fit(Xtr, y_train)
+    return roc_auc_score(y_test, model.predict_proba(Xte)[:, 1])
+
+base = ["recency_days", "orders_90d", "spend_90d"]
+print(f"honest features:              AUC {quick_auc(base):.3f}")
+print(f"+ leaky 'days since last':    AUC {quick_auc(base, days_since_last):.3f}")
+`} />
+
+The leaky feature "knows" whether the customer ordered after the cutoff, which is the label itself. The model looks brilliant offline and is useless in production, where that column is just recency again.
+
+The test for every feature: **"on the day I make this prediction, could I compute this value?"** A sudden jump in accuracy from one feature is a reason for suspicion, not celebration.
+
+## One pipeline: preprocessing + model
+
+Real tables have missing values, categories and mixed scales. If you impute and scale with statistics computed on *all* rows before splitting, the test set has leaked into training. A scikit-learn **Pipeline** learns every preprocessing step from the training data only and applies exactly the same steps at prediction time.
+
+<PyCell code={`
+numeric = ["tenure_days", "recency_days", "orders_total", "orders_90d", "orders_365d", "spend_90d", "spend_365d",
+           "avg_order_value", "discount_share", "refund_rate", "tickets_180d", "neg_tickets_180d", "min_csat_180d", "age", "plus_member"]
+categorical = ["channel", "device", "country"]
+
+print(train[numeric + categorical].isna().sum().loc[lambda s: s > 0])
+`} />
+
+**3.** Finish the pipeline. `preprocess` must be a `ColumnTransformer` that sends the `numeric` columns through the numeric steps and one-hot encodes the `categorical` columns (ignoring categories never seen in training). `model` chains `preprocess` with a `LogisticRegression(max_iter=1000)`. Fit it on the training snapshot and store the out-of-time AUC in `auc`.
+
+<PyCell
+  code={`
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+numeric_steps = make_pipeline(SimpleImputer(strategy="median"), StandardScaler())
+
+preprocess = ColumnTransformer([
+    ("num", numeric_steps, numeric),
+    # ("cat", ..., categorical),
+])
+model = ...
+
+model.fit(train, y_train)
+auc = roc_auc_score(y_test, model.predict_proba(test)[:, 1])
+print(f"out-of-time AUC: {auc:.3f}")
+`}
+  check={`
+from sklearn.pipeline import Pipeline as _P
+from sklearn.compose import ColumnTransformer as _CT
+assert isinstance(model, _P), "model should be a Pipeline: Pipeline([('preprocess', preprocess), ('clf', LogisticRegression(max_iter=1000))])"
+assert any(isinstance(s, _CT) for _, s in model.steps), "the pipeline should contain the ColumnTransformer"
+_used = [c for _, _, cols in model.steps[0][1].transformers_ for c in cols]
+assert set(categorical) <= set(_used), "the categorical columns are not being used: add ('cat', OneHotEncoder(handle_unknown='ignore'), categorical)"
+try:
+    model.predict_proba(test.head(3).assign(channel="tiktok"))
+except Exception as e:
+    raise AssertionError("the model fails on a category it never saw: use OneHotEncoder(handle_unknown='ignore')") from None
+assert abs(auc - roc_auc_score(y_test, model.predict_proba(test)[:, 1])) < 1e-9 and auc > 0.75, "auc should be the pipeline's AUC on the test snapshot"
+`}
+  hint="`('cat', OneHotEncoder(handle_unknown='ignore'), categorical)` and `Pipeline([('preprocess', preprocess), ('clf', LogisticRegression(max_iter=1000))])`."
+  solution={`
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+numeric_steps = make_pipeline(SimpleImputer(strategy="median"), StandardScaler())
+
+preprocess = ColumnTransformer([
+    ("num", numeric_steps, numeric),
+    ("cat", OneHotEncoder(handle_unknown="ignore"), categorical),
+])
+model = Pipeline([("preprocess", preprocess), ("clf", LogisticRegression(max_iter=1000))])
+
+model.fit(train, y_train)
+auc = roc_auc_score(y_test, model.predict_proba(test)[:, 1])
+print(f"out-of-time AUC: {auc:.3f}")
+`}
+/>
+
+Because the pipeline is a single estimator, cross-validation refits the imputer, scaler and encoder inside every fold, so the validation fold never influences preprocessing:
+
+<PyCell code={`
+from sklearn.model_selection import cross_val_score
+
+scores = cross_val_score(model, train, y_train, cv=5, scoring="roc_auc")
+print("5-fold AUC on the training snapshot:", scores.round(3), "mean", scores.mean().round(3))
+`} />
+
+## Encode what you know about the domain
+
+Recency means different things for different customers: 30 days of silence is alarming for a weekly buyer and normal for a quarterly one. Encode that knowledge.
+
+**4.** Write `add_features(df)`: it returns a **copy** of `df` with two new columns. `avg_gap_days` is the customer's typical days between orders: `(tenure_days - recency_days)`, floored at 1, divided by `orders_total`. `recency_ratio` is `recency_days / avg_gap_days`.
+
+<PyCell
+  code={`
+def add_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    # df["avg_gap_days"] = ...
+    # df["recency_ratio"] = ...
+    return df
+
+add_features(train)[["tenure_days", "recency_days", "orders_total"]].head(3)
+`}
+  check={`
+_o = add_features(train)
+assert {"avg_gap_days", "recency_ratio"} <= set(_o.columns), "add the two new columns"
+assert "avg_gap_days" not in train.columns, "return a copy; don't modify the input frame"
+_g = (train["tenure_days"] - train["recency_days"]).clip(lower=1) / train["orders_total"]
+assert np.allclose(_o["avg_gap_days"], _g), "avg_gap_days = (tenure_days - recency_days).clip(lower=1) / orders_total"
+assert np.allclose(_o["recency_ratio"], train["recency_days"] / _g), "recency_ratio = recency_days / avg_gap_days"
+`}
+  hint="`df['avg_gap_days'] = (df['tenure_days'] - df['recency_days']).clip(lower=1) / df['orders_total']`"
+  solution={`
+def add_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["avg_gap_days"] = (df["tenure_days"] - df["recency_days"]).clip(lower=1) / df["orders_total"]
+    df["recency_ratio"] = df["recency_days"] / df["avg_gap_days"]
+    return df
+
+add_features(train)[["tenure_days", "recency_days", "orders_total", "avg_gap_days", "recency_ratio"]].head(3)
+`}
+/>
+
+Put the function *inside* the pipeline with `FunctionTransformer`, so that training, evaluation and production all apply the same code:
+
+<PyCell code={`
+from sklearn.preprocessing import FunctionTransformer
+
+preprocess2 = ColumnTransformer([
+    ("num", numeric_steps, numeric + ["avg_gap_days", "recency_ratio"]),
+    ("cat", OneHotEncoder(handle_unknown="ignore"), categorical),
+])
+model2 = Pipeline([
+    ("features", FunctionTransformer(add_features)),
+    ("preprocess", preprocess2),
+    ("clf", LogisticRegression(max_iter=1000)),
+]).fit(train, y_train)
+
+auc2 = roc_auc_score(y_test, model2.predict_proba(test)[:, 1])
+print(f"three basic features: {quick_auc(base):.3f}   full table: {auc:.3f}   + domain features: {auc2:.3f}")
+`} />
+
+Measure, don't assume: here the full table helps, and the ratio adds almost nothing on top of it (the model could already combine recency and order counts). Note how far three sensible features get you: that simple model is the **baseline** every later model has to justify itself against.
+
+## Look inside
+
+A linear model on scaled features can be read directly: the largest coefficients are the strongest signals. Check that they make sense; a nonsensical top feature is usually a bug or a leak.
+
+<PyCell code={`
+names = model2["preprocess"].get_feature_names_out()
+coefs = pd.Series(model2[-1].coef_[0], index=names).sort_values()
+pd.concat([coefs.head(5), coefs.tail(5)]).round(3).to_frame("coefficient (per standard deviation)")
+`} />
+
+<Lab title="Persist and reload the model" time="10 min">
+
+A fitted pipeline is one object: save it, and whoever loads it gets preprocessing and model together.
+
+```python
+import joblib, sklearn
+
+joblib.dump({"model": model2, "sklearn_version": sklearn.__version__, "trained_on": "2024-04-01"}, "churn_model.joblib")
+```
+
+In a **new** Python process, load it and score fresh rows:
+
+```python
+import joblib, dsw
+bundle = joblib.load("churn_model.joblib")
+scores = bundle["model"].predict_proba(dsw.churn_snapshot("2024-10-01"))[:, 1]
+```
+
+It fails with `AttributeError: Can't get attribute 'add_features'`. Pickles store *references* to your functions, not their code. Fix it the way teams do: move `add_features` into a module (`features.py`), import it from there in both the training script and the scoring script, and try again. Also note the recorded scikit-learn version: loading a pickle with a different version is unsupported, which is why the lockfile from lesson 1 matters.
+
+</Lab>

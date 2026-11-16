@@ -1,0 +1,312 @@
+---
+title: "Running and reading A/B tests"
+description: "Check an experiment's health, estimate the effect with an interval, handle revenue metrics, catch a broken test, and plan sample size."
+module: "Analysis and experiments"
+order: 7
+minutes: 40
+tools: ["pandas", "SciPy", "statsmodels"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+You know what a hypothesis test is. On the job, the statistics are the short part. The work is **verifying the experiment is valid, quantifying the effect in business terms, and giving a recommendation**. This lesson walks through a full readout, then a broken test, then planning.
+
+> **Marco (Product):** The one-page checkout test ran for two weeks. Did it win? Can we ship it?
+
+<PyCell code={`
+import dsw
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+ab = dsw.load("ab_checkout")
+print(ab.shape)
+ab.head()
+`} />
+
+One row per user: the `variant` they were assigned, whether they `converted` (placed an order) and their `revenue` during the test.
+
+## Step 1: is the experiment healthy?
+
+Before looking at any outcome, check two things. Results from an unhealthy test are not "roughly right"; they're uninterpretable.
+
+**Sample ratio mismatch (SRM).** With a 50/50 split, the group sizes should differ only by chance. A chi-square test against the intended split detects assignment or logging bugs. Convention: investigate if p < 0.001.
+
+**Balance.** Pre-experiment characteristics should look the same in both groups.
+
+<PyCell code={`
+counts = ab["variant"].value_counts()
+srm = stats.chisquare(counts, f_exp=[len(ab) / 2] * 2)
+print(counts.to_dict(), f"-> SRM p-value = {srm.pvalue:.2f}: no sign of a problem\\n")
+
+ab.groupby("variant").agg(
+    users=("user_id", "count"),
+    mobile_share=("device", lambda s: (s == "mobile").mean()),
+    returning_share=("returning", "mean"),
+    prior_spend=("prior_spend_90d", "mean"),
+).round(3)
+`} />
+
+## Step 2: the effect on conversion
+
+**1.** Compute the conversion rate of each variant and the lift: `cr_control`, `cr_treatment`, `lift_abs` (treatment minus control, in proportion points) and `lift_rel` (relative to control).
+
+<PyCell
+  code={`
+cr_control = ...
+cr_treatment = ...
+lift_abs = ...
+lift_rel = ...
+
+print(f"control {cr_control:.2%}  treatment {cr_treatment:.2%}  lift {lift_abs * 100:+.2f} pp ({lift_rel:+.1%})")
+`}
+  check={`
+_c = ab.loc[ab["variant"] == "control", "converted"].mean()
+_t = ab.loc[ab["variant"] == "treatment", "converted"].mean()
+assert not isinstance(lift_rel, type(...)), "replace the ... placeholders"
+assert abs(cr_control - _c) < 1e-9 and abs(cr_treatment - _t) < 1e-9, "conversion rate = mean of converted within each variant"
+assert abs(lift_abs - (_t - _c)) < 1e-9, "lift_abs = cr_treatment - cr_control"
+assert abs(lift_rel - (_t - _c) / _c) < 1e-9, "lift_rel = lift_abs / cr_control"
+`}
+  hint="`ab.groupby('variant')['converted'].mean()` gives both rates; index it with `['control']` and `['treatment']`."
+  solution={`
+rates = ab.groupby("variant")["converted"].mean()
+cr_control = rates["control"]
+cr_treatment = rates["treatment"]
+lift_abs = cr_treatment - cr_control
+lift_rel = lift_abs / cr_control
+
+print(f"control {cr_control:.2%}  treatment {cr_treatment:.2%}  lift {lift_abs * 100:+.2f} pp ({lift_rel:+.1%})")
+`}
+/>
+
+**2.** Quantify the uncertainty. Use statsmodels' `proportions_ztest` for the p-value and `confint_proportions_2indep` for a 95% confidence interval of the **difference** (treatment minus control). Store `p_value`, `ci_low`, `ci_high`.
+
+<PyCell
+  code={`
+from statsmodels.stats.proportion import proportions_ztest, confint_proportions_2indep
+
+conv = ab.groupby("variant")["converted"].agg(["sum", "count"])
+x_t, n_t = conv.loc["treatment"]
+x_c, n_c = conv.loc["control"]
+
+p_value = ...
+ci_low, ci_high = ..., ...
+
+print(f"p = {p_value:.4f}; 95% CI for the lift: [{ci_low * 100:+.2f}, {ci_high * 100:+.2f}] pp")
+`}
+  check={`
+from statsmodels.stats.proportion import proportions_ztest as _z, confint_proportions_2indep as _ci
+_k = ab.groupby("variant")["converted"].agg(["sum", "count"])
+_p = _z([_k.loc["treatment", "sum"], _k.loc["control", "sum"]], [_k.loc["treatment", "count"], _k.loc["control", "count"]])[1]
+_lo, _hi = _ci(_k.loc["treatment", "sum"], _k.loc["treatment", "count"], _k.loc["control", "sum"], _k.loc["control", "count"])
+assert not isinstance(p_value, type(...)), "replace the ... placeholders"
+assert abs(p_value - _p) < 1e-9, "p_value = proportions_ztest([x_t, x_c], [n_t, n_c])[1]"
+assert abs(ci_low - _lo) < 2e-4 and abs(ci_high - _hi) < 2e-4, "ci = confint_proportions_2indep(x_t, n_t, x_c, n_c): treatment first, so the difference is treatment - control"
+`}
+  hint="`proportions_ztest([x_t, x_c], [n_t, n_c])` returns `(z, p)`. `confint_proportions_2indep(x_t, n_t, x_c, n_c)` returns `(low, high)` for treatment minus control."
+  solution={`
+from statsmodels.stats.proportion import proportions_ztest, confint_proportions_2indep
+
+conv = ab.groupby("variant")["converted"].agg(["sum", "count"])
+x_t, n_t = conv.loc["treatment"]
+x_c, n_c = conv.loc["control"]
+
+p_value = proportions_ztest([x_t, x_c], [n_t, n_c])[1]
+ci_low, ci_high = confint_proportions_2indep(x_t, n_t, x_c, n_c)
+
+print(f"p = {p_value:.4f}; 95% CI for the lift: [{ci_low * 100:+.2f}, {ci_high * 100:+.2f}] pp")
+`}
+/>
+
+Lead with the interval, not the p-value. "Conversion rose by between 0.9 and 2.1 points" tells Marco how big the win plausibly is; "p < 0.001" only tells him it isn't zero.
+
+## Step 3: revenue per user
+
+Conversion is not money. The decision metric is usually **revenue per user**, which is mostly zeros with a long right tail. With tens of thousands of users per arm a Welch t-test on the means is still valid; a **bootstrap** makes no distributional assumption and gives you an interval for any statistic.
+
+<PyCell code={`
+rev_t = ab.loc[ab["variant"] == "treatment", "revenue"].to_numpy()
+rev_c = ab.loc[ab["variant"] == "control", "revenue"].to_numpy()
+
+print(f"revenue per user: control {rev_c.mean():.3f}, treatment {rev_t.mean():.3f}, diff {rev_t.mean() - rev_c.mean():+.3f}")
+print(f"share of users with zero revenue: {(ab['revenue'] == 0).mean():.1%}")
+print("Welch t-test p-value:", round(stats.ttest_ind(rev_t, rev_c, equal_var=False).pvalue, 4))
+`} />
+
+**3.** Bootstrap a 95% confidence interval for the difference in mean revenue per user. Draw 2,000 resamples of each arm **with replacement** (same size as the arm), compute the difference in means for each, and take the 2.5th and 97.5th percentiles. Store them in `boot_low` and `boot_high`.
+
+<PyCell
+  code={`
+rng = np.random.default_rng(0)
+n_boot = 2000
+
+diffs = np.empty(n_boot)
+for b in range(n_boot):
+    ...   # resample each arm with rng.choice(..., size=len(arm), replace=True) and store the difference in means
+
+boot_low, boot_high = ..., ...
+print(f"bootstrap 95% CI for revenue per user: [{boot_low:+.3f}, {boot_high:+.3f}]")
+`}
+  check={`
+_d = rev_t.mean() - rev_c.mean()
+_se = np.sqrt(rev_t.var(ddof=1) / len(rev_t) + rev_c.var(ddof=1) / len(rev_c))
+assert not isinstance(boot_low, type(...)), "replace the ... placeholders"
+assert boot_low < _d < boot_high, "the interval should contain the observed difference"
+assert abs(boot_low - (_d - 1.96 * _se)) < 0.12 and abs(boot_high - (_d + 1.96 * _se)) < 0.12, "interval is off: resample each arm at its full size with replacement, 2,000 times, then np.percentile(diffs, [2.5, 97.5])"
+`}
+  hint="Inside the loop: `diffs[b] = rng.choice(rev_t, len(rev_t), replace=True).mean() - rng.choice(rev_c, len(rev_c), replace=True).mean()`. Then `np.percentile(diffs, [2.5, 97.5])`."
+  solution={`
+rng = np.random.default_rng(0)
+n_boot = 2000
+
+diffs = np.empty(n_boot)
+for b in range(n_boot):
+    t = rng.choice(rev_t, size=len(rev_t), replace=True)
+    c = rng.choice(rev_c, size=len(rev_c), replace=True)
+    diffs[b] = t.mean() - c.mean()
+
+boot_low, boot_high = np.percentile(diffs, [2.5, 97.5])
+print(f"bootstrap 95% CI for revenue per user: [{boot_low:+.3f}, {boot_high:+.3f}]")
+`}
+/>
+
+## Step 4: segments, carefully
+
+Marco will ask "does it work everywhere?" Look, but slice **few, pre-agreed** segments. Slice twenty and one will look significant by chance alone.
+
+<PyCell code={`
+seg = ab.pivot_table(index="device", columns="variant", values="converted", aggfunc=["mean", "count"])
+seg[("lift", "pp")] = (seg[("mean", "treatment")] - seg[("mean", "control")]) * 100
+for dev, g in ab.groupby("device"):
+    k = g.groupby("variant")["converted"].agg(["sum", "count"])
+    lo, hi = confint_proportions_2indep(k.loc["treatment", "sum"], k.loc["treatment", "count"], k.loc["control", "sum"], k.loc["control", "count"])
+    print(f"{dev:8s} lift 95% CI: [{lo * 100:+.2f}, {hi * 100:+.2f}] pp")
+seg.round(4)
+`} />
+
+The gain comes from **mobile**; on desktop the interval comfortably includes zero. A defensible readout: *ship it, the win is on mobile, no evidence of harm on desktop.*
+
+## A test you must not read
+
+> **Marco:** While you're at it: the free-shipping banner test also finished. The dashboard says treatment converts better, p = 0.02!
+
+<PyCell code={`
+ship = dsw.load("ab_shipping")
+k = ship.groupby("variant")["converted"].agg(["sum", "count", "mean"])
+print(k.round(4), "\\n")
+print("naive p-value:", round(proportions_ztest(k["sum"], k["count"])[1], 4))
+`} />
+
+**4.** Run the health check first. Compute `srm_p`, the SRM p-value for `ship` against a 50/50 split. Then find which `browser` is responsible: store its name in `culprit`.
+
+<PyCell
+  code={`
+srm_p = ...
+
+# compare group sizes per browser to find where users went missing
+print(ship.pivot_table(index="browser", columns="variant", values="user_id", aggfunc="count"))
+
+culprit = ...
+print(f"SRM p-value: {srm_p:.2e}; missing users are on: {culprit}")
+`}
+  check={`
+_n = ship["variant"].value_counts()
+_p = stats.chisquare(_n, f_exp=[len(ship) / 2] * 2).pvalue
+assert not isinstance(srm_p, type(...)), "replace the ... placeholders"
+assert abs(srm_p - _p) < 1e-12 or abs(np.log10(srm_p) - np.log10(_p)) < 0.01, "srm_p = stats.chisquare(counts, f_exp=[len(ship) / 2] * 2).pvalue"
+assert str(culprit).lower() == "safari", "look at the per-browser counts: one browser has far fewer treatment users than control users"
+`}
+  hint="`stats.chisquare(ship['variant'].value_counts(), f_exp=[len(ship) / 2] * 2).pvalue`. In the pivot, one browser has about 30% fewer treatment users."
+  solution={`
+srm_p = stats.chisquare(ship["variant"].value_counts(), f_exp=[len(ship) / 2] * 2).pvalue
+
+# compare group sizes per browser to find where users went missing
+print(ship.pivot_table(index="browser", columns="variant", values="user_id", aggfunc="count"))
+
+culprit = "safari"
+print(f"SRM p-value: {srm_p:.2e}; missing users are on: {culprit}")
+`}
+/>
+
+Treatment lost a third of its Safari users before they were logged, and Safari users convert worst. The "lift" is produced entirely by who went missing. The correct readout is: **invalid, fix the tracking, rerun**. Reporting the 0.02 would be the mistake; catching it is the job.
+
+## Planning: how long must a test run?
+
+Before a test starts you'll be asked how long it needs. That requires the baseline rate, the **minimum detectable effect** (the smallest lift worth acting on, a business decision), significance level and power.
+
+<PyCell code={`
+from statsmodels.stats.power import NormalIndPower
+from statsmodels.stats.proportion import proportion_effectsize
+
+def users_per_arm(baseline, mde_abs, alpha=0.05, power=0.8):
+    es = proportion_effectsize(baseline + mde_abs, baseline)
+    return int(np.ceil(NormalIndPower().solve_power(effect_size=es, alpha=alpha, power=power, alternative="two-sided")))
+
+for mde in (0.02, 0.01, 0.005):
+    print(f"detect +{mde * 100:.1f} pp on a 10% baseline: {users_per_arm(0.10, mde):>7,} users per arm")
+`} />
+
+Halving the detectable effect quadruples the sample. That trade-off is the conversation to have with the product manager *before* launch.
+
+**5.** The next test targets the cart page: baseline conversion 6%, and the team cares about an absolute lift of 0.6 points or more. The page gets 2,500 eligible users per day, split 50/50. Compute `n_per_arm` (with the function above, default alpha and power) and `days_needed` (whole days, rounded up).
+
+<PyCell
+  code={`
+n_per_arm = ...
+days_needed = ...
+print(f"{n_per_arm:,} users per arm -> run for {days_needed} days")
+`}
+  check={`
+_n = users_per_arm(0.06, 0.006)
+assert not isinstance(days_needed, type(...)), "replace the ... placeholders"
+assert n_per_arm == _n, f"n_per_arm = users_per_arm(0.06, 0.006); expected {_n:,}"
+assert days_needed == int(np.ceil(2 * _n / 2500)), "days_needed = ceil(total users across both arms / 2,500 per day)"
+`}
+  hint="`users_per_arm(0.06, 0.006)`; both arms together need `2 * n_per_arm` users at 2,500 per day: `int(np.ceil(2 * n_per_arm / 2500))`."
+  solution={`
+n_per_arm = users_per_arm(0.06, 0.006)
+days_needed = int(np.ceil(2 * n_per_arm / 2500))
+print(f"{n_per_arm:,} users per arm -> run for {days_needed} days")
+`}
+/>
+
+Round the duration up to **whole weeks** so every weekday is equally represented, and fix it in advance.
+
+## Why you don't stop early
+
+Checking the p-value daily and stopping at the first p < 0.05 inflates false positives. This simulates 1,000 A/A tests (no true difference) with a daily peek:
+
+<PyCell code={`
+rng = np.random.default_rng(1)
+sims, days, per_day, p0 = 1000, 14, 1500, 0.10
+
+a = rng.binomial(per_day, p0, (sims, days)).cumsum(axis=1)
+b = rng.binomial(per_day, p0, (sims, days)).cumsum(axis=1)
+n = per_day * np.arange(1, days + 1)
+pooled = (a + b) / (2 * n)
+z = (a / n - b / n) / np.sqrt(2 * pooled * (1 - pooled) / n)
+p = 2 * stats.norm.sf(np.abs(z))
+
+print(f"false positives when testing once, on day 14:  {(p[:, -1] < 0.05).mean():.1%}")
+print(f"false positives when peeking daily and stopping: {(p < 0.05).any(axis=1).mean():.1%}")
+`} />
+
+If the business needs early stopping, use a method built for it (group-sequential boundaries or always-valid p-values, which most experimentation platforms offer), not repeated ordinary tests.
+
+<Lab title="Write the readout" time="15 min">
+
+The deliverable of an A/B test is a half-page document. Write one for the checkout test in your own words, using this structure, and time-box it to fifteen minutes:
+
+```text
+Decision:   Ship / don't ship / rerun, in one sentence.
+Result:     Primary metric with absolute lift and 95% CI. Revenue per user with CI.
+Validity:   Dates, sample sizes, SRM check, balance check, any incidents.
+Segments:   Only the pre-agreed ones. State that others were not examined.
+Impact:     Lift x annual traffic, as a range from the CI, with assumptions.
+Caveats:    Novelty effects, seasonality of the test window, metrics not measured.
+```
+
+Then compare with a colleague's, or ask an AI assistant to critique it as a sceptical product director would.
+
+</Lab>

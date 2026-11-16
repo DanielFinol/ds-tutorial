@@ -310,7 +310,7 @@ def _tickets() -> pd.DataFrame:
 # --------------------------------------------------------------------------- experiments
 @lru_cache(maxsize=None)
 def _ab_checkout() -> pd.DataFrame:
-    rng = np.random.default_rng(15)
+    rng = np.random.default_rng(25)
     n = 42000
     variant = rng.choice(["control", "treatment"], n)
     device = rng.choice(["mobile", "desktop"], n, p=[0.62, 0.38])
@@ -563,6 +563,12 @@ def raw_orders_csv() -> str:
 
 # --------------------------------------------------------------------------- churn snapshot
 def churn_snapshot(cutoff: str = "2024-07-01", horizon_days: int = 90) -> pd.DataFrame:
+    """Point-in-time modelling table (see _churn_snapshot). Returns a fresh copy."""
+    return _churn_snapshot(str(pd.Timestamp(cutoff).date()), int(horizon_days)).copy()
+
+
+@lru_cache(maxsize=None)
+def _churn_snapshot(cutoff: str, horizon_days: int) -> pd.DataFrame:
     """Point-in-time modelling table: features use only data before `cutoff`;
     `churned` is True when the customer places no completed order in the
     `horizon_days` after it. Includes customers with a completed order in the
@@ -587,9 +593,9 @@ def churn_snapshot(cutoff: str = "2024-07-01", horizon_days: int = 90) -> pd.Dat
             "recency_days": (cutoff_ts - g["order_ts"].max()).dt.days,
             "orders_total": g.size(),
             "avg_order_value": g["total"].mean().round(2),
-            "discount_share": g["discount_pct"].apply(lambda s: (s > 0).mean()).round(3),
         }
     )
+    f["discount_share"] = (past["discount_pct"] > 0).groupby(past["customer_id"]).mean().round(3)
     for days in (90, 365):
         w = window(past, days).groupby("customer_id")
         f[f"orders_{days}d"] = w.size()
