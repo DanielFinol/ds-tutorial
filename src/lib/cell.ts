@@ -185,7 +185,12 @@ export class PyCellElement extends HTMLElement {
       out.appendChild(img);
     }
     if (r.stderr) pre(r.stderr, 'stderr');
-    if (r.error) pre(r.error, 'error');
+    if (r.error) {
+      pre(r.error, 'error');
+      const all = [...document.querySelectorAll<PyCellElement>('py-cell')];
+      const unsolved = all.slice(0, all.indexOf(this)).some((c) => c.dataset.check && !c.classList.contains('is-passed'));
+      if (unsolved) pre('Note: an earlier exercise on this page is not solved yet. Later cells build on it, so solve it first.', 'muted');
+    }
     if (r.checkPassed === true) {
       out.classList.add('passed');
       pre('✓ Correct.', 'success');

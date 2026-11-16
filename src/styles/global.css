@@ -173,3 +173,7 @@ kbd { font-family: var(--mono); font-size: 0.82em; border: 1px solid var(--borde
   .astro-code, .astro-code span { color: var(--shiki-dark) !important; background-color: var(--code-bg) !important; }
 }
 .lesson-card .tools { font-size: 13px; margin-top: 4px; }
+
+/* Code must show the characters you type: no programming ligatures */
+code, pre, .cm-content { font-variant-ligatures: none; font-feature-settings: 'liga' 0, 'calt' 0; }
+.cell-out .muted { white-space: pre-wrap; }

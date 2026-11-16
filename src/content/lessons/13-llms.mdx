@@ -1,0 +1,366 @@
+---
+title: "LLMs in the data workflow"
+description: "Use a language model as a component: structured output you can parse and validate, an evaluation set, prompt iteration measured by numbers, retries and cost."
+module: "Shipping your work"
+order: 13
+minutes: 35
+tools: ["LLM APIs", "pydantic", "pandas"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+In today's workplace a data scientist is expected to put language models to work on text: classifying tickets, extracting fields from documents, summarising feedback. The model call is the easy part. The job is everything around it: **getting output a program can use, measuring quality on labelled examples, improving it deliberately, and knowing what it costs.**
+
+> **Support lead:** We get thousands of tickets a month. Can we tag each one with a category and urgency automatically, and pull out the order number?
+
+The browser can't hold an API key safely, so this lesson uses `dsw.FakeLLM`, a stand-in that behaves like a hosted model, including its bad habits: Markdown fences, chatty preambles, labels that are almost right, and replies cut off mid-JSON. Everything you build here works unchanged against a real model, which you'll do in the lab at the end.
+
+<PyCell code={`
+import json
+import re
+import dsw
+import pandas as pd
+
+tickets = dsw.load("tickets")
+eval_set = tickets.sample(300, random_state=7).reset_index(drop=True)   # labelled examples to measure against
+print(dsw.TICKET_CATEGORIES)
+eval_set[["text", "category"]].head(4)
+`} />
+
+## A first prompt, and what comes back
+
+<PyCell code={`
+PROMPT_V1 = """Classify this customer support ticket. Reply in JSON with the keys
+category, urgency and order_id.
+
+Ticket: {text}"""
+
+llm = dsw.FakeLLM()
+for text in eval_set["text"].head(5):
+    print(repr(llm.complete(PROMPT_V1.format(text=text))), "\\n")
+`} />
+
+Five replies, several formats. `json.loads` on those would crash a pipeline within minutes. Two defences are needed: tolerant **parsing**, then strict **validation**.
+
+**1.** Write `parse_reply(reply)`: return the JSON object in the reply as a `dict`, or `None` if there isn't a complete one. It must cope with code fences and with text before or after the JSON.
+
+<PyCell
+  code={`
+def parse_reply(reply: str) -> dict | None:
+    try:
+        return json.loads(reply)
+    except json.JSONDecodeError:
+        return None   # improve this: find the {...} part first
+
+for text in eval_set["text"].head(5):
+    print(parse_reply(llm.complete(PROMPT_V1.format(text=text))))
+`}
+  check={`
+_body = '{"category": "billing", "urgency": "low", "order_id": null}'
+assert parse_reply(_body) == json.loads(_body), "plain JSON should parse"
+assert parse_reply("\`\`\`json\\n" + _body + "\\n\`\`\`") == json.loads(_body), "JSON inside a Markdown code fence should parse"
+assert parse_reply("Sure! Here is the classification:\\n\\n" + _body + "\\n\\nLet me know if you need anything else.") == json.loads(_body), "JSON surrounded by prose should parse"
+assert parse_reply(_body[:-9]) is None, "a truncated reply should return None, not raise"
+assert parse_reply("I cannot help with that.") is None, "a reply without JSON should return None"
+`}
+  hint="Search for the outermost braces with `re.search(r'\\{.*\\}', reply, re.DOTALL)`; if there is no match return None; otherwise `json.loads(match.group(0))` inside try/except."
+  solution={`
+def parse_reply(reply: str) -> dict | None:
+    match = re.search(r"\\{.*\\}", reply, re.DOTALL)
+    if match is None:
+        return None
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+
+for text in eval_set["text"].head(5):
+    print(parse_reply(llm.complete(PROMPT_V1.format(text=text))))
+`}
+/>
+
+Parsed is not the same as *correct*: look at the categories. `"Refund"` and `"late_delivery"` aren't in the taxonomy. Downstream code that groups by category would silently create new groups. Declare the contract once with **pydantic** and reject anything outside it.
+
+**2.** Define a pydantic model `TicketLabel` with fields `category` (one of the six values in `dsw.TICKET_CATEGORIES`), `urgency` (`"low"`, `"medium"` or `"high"`) and `order_id` (an integer or `None`). Then write `validate(data)` returning a `TicketLabel`, or `None` when `data` is `None` or invalid.
+
+<PyCell
+  code={`
+from typing import Literal
+from pydantic import BaseModel, ValidationError
+
+class TicketLabel(BaseModel):
+    category: str      # too permissive: restrict to the six allowed values with Literal[...]
+    urgency: str
+    order_id: int | None
+
+def validate(data: dict | None) -> TicketLabel | None:
+    ...
+
+print(validate({"category": "billing", "urgency": "low", "order_id": None}))
+print(validate({"category": "Refund", "urgency": "low", "order_id": None}))
+`}
+  check={`
+_ok = validate({"category": "billing", "urgency": "low", "order_id": None})
+assert _ok is not None and _ok.category == "billing", "a valid record should return a TicketLabel"
+assert validate({"category": "refund_request", "urgency": "high", "order_id": 123456}).order_id == 123456
+assert validate({"category": "Refund", "urgency": "low", "order_id": None}) is None, "'Refund' is not an allowed category: use Literal with the six exact values"
+assert validate({"category": "billing", "urgency": "urgent", "order_id": None}) is None, "'urgent' is not an allowed urgency"
+assert validate({"category": "billing"}) is None, "missing fields should be rejected"
+assert validate(None) is None, "None in, None out"
+`}
+  hint="`category: Literal['shipping_delay', 'damaged_item', 'refund_request', 'billing', 'product_question', 'account']`, `urgency: Literal['low', 'medium', 'high']`. In validate: return None if data is None; `try: return TicketLabel(**data)` / `except ValidationError: return None`."
+  solution={`
+from typing import Literal
+from pydantic import BaseModel, ValidationError
+
+class TicketLabel(BaseModel):
+    category: Literal["shipping_delay", "damaged_item", "refund_request", "billing", "product_question", "account"]
+    urgency: Literal["low", "medium", "high"]
+    order_id: int | None
+
+def validate(data: dict | None) -> TicketLabel | None:
+    if data is None:
+        return None
+    try:
+        return TicketLabel(**data)
+    except (ValidationError, TypeError):
+        return None
+
+print(validate({"category": "billing", "urgency": "low", "order_id": None}))
+print(validate({"category": "Refund", "urgency": "low", "order_id": None}))
+`}
+/>
+
+## Measure before you improve
+
+"It looks good on the examples I tried" is how unreliable LLM features get shipped. You need a labelled **evaluation set** (a few hundred examples is plenty to start) and a function that turns a prompt into numbers.
+
+**3.** Write `evaluate(template, df)`. For every ticket in `df`, call a fresh `dsw.FakeLLM()` with `template.format(text=...)`, parse and validate the reply. Return a dict with `valid_rate` (share of replies that pass validation) and `accuracy` (share of **all** tickets whose validated category equals the true `category`; an invalid reply counts as wrong).
+
+<PyCell
+  code={`
+def evaluate(template: str, df: pd.DataFrame) -> dict:
+    model = dsw.FakeLLM()
+    labels = [validate(parse_reply(model.complete(template.format(text=t)))) for t in df["text"]]
+    ...
+
+evaluate(PROMPT_V1, eval_set)
+`}
+  check={`
+def _ref(template, df):
+    m = dsw.FakeLLM(); ok = right = 0
+    for t, y in zip(df["text"], df["category"]):
+        mt = re.search(r"\\{.*\\}", m.complete(template.format(text=t)), re.DOTALL)
+        try:
+            d = json.loads(mt.group(0)) if mt else None
+        except json.JSONDecodeError:
+            d = None
+        good = isinstance(d, dict) and d.get("category") in dsw.TICKET_CATEGORIES and d.get("urgency") in ("low", "medium", "high") and "order_id" in d
+        ok += good; right += good and d["category"] == y
+    return {"valid_rate": ok / len(df), "accuracy": right / len(df)}
+_r, _e = evaluate(PROMPT_V1, eval_set), _ref(PROMPT_V1, eval_set)
+assert isinstance(_r, dict) and {"valid_rate", "accuracy"} <= set(_r), "return a dict with keys valid_rate and accuracy"
+assert abs(_r["valid_rate"] - _e["valid_rate"]) < 1e-9, f"valid_rate should be {_e['valid_rate']:.3f}: the share of labels that are not None"
+assert abs(_r["accuracy"] - _e["accuracy"]) < 1e-9, f"accuracy should be {_e['accuracy']:.3f}: correct categories divided by ALL tickets (invalid replies count as wrong)"
+`}
+  hint="`valid = [l is not None for l in labels]`; `correct = [l is not None and l.category == y for l, y in zip(labels, df['category'])]`; return `{'valid_rate': sum(valid) / len(df), 'accuracy': sum(correct) / len(df)}`."
+  solution={`
+def evaluate(template: str, df: pd.DataFrame) -> dict:
+    model = dsw.FakeLLM()
+    labels = [validate(parse_reply(model.complete(template.format(text=t)))) for t in df["text"]]
+    valid = [label is not None for label in labels]
+    correct = [label is not None and label.category == truth for label, truth in zip(labels, df["category"])]
+    return {"valid_rate": sum(valid) / len(df), "accuracy": sum(correct) / len(df)}
+
+evaluate(PROMPT_V1, eval_set)
+`}
+/>
+
+Fewer than half the tickets get a usable, correct label. Now there is a number to move.
+
+## Improve the prompt, one change at a time
+
+Most invalid replies come from the model inventing its own label names and wrapping the JSON in prose. Both are fixed by telling it exactly what you want.
+
+**4.** Write `PROMPT_V2`. It must **list the six allowed category values and the three urgency values**, and instruct the model to **respond with only JSON and no other text**. Keep the `Ticket: {text}` line at the end. Target: `valid_rate` above 0.9.
+
+<PyCell
+  code={`
+PROMPT_V2 = """Classify this customer support ticket.
+
+Ticket: {text}"""
+
+evaluate(PROMPT_V2, eval_set)
+`}
+  check={`
+assert "{text}" in PROMPT_V2 and PROMPT_V2.rstrip().endswith("{text}"), "keep 'Ticket: {text}' as the last line"
+assert all(c in PROMPT_V2 for c in dsw.TICKET_CATEGORIES), "list all six allowed category values, spelled exactly as in dsw.TICKET_CATEGORIES"
+_r = evaluate(PROMPT_V2, eval_set)
+assert _r["valid_rate"] > 0.9, f"valid_rate is {_r['valid_rate']:.2f}: tell the model to respond with only JSON and no other text"
+assert _r["accuracy"] > evaluate(PROMPT_V1, eval_set)["accuracy"], "accuracy should improve over PROMPT_V1"
+`}
+  hint="Add lines such as: 'category must be exactly one of: shipping_delay, damaged_item, refund_request, billing, product_question, account', 'urgency must be one of: low, medium, high', 'order_id is the order number as an integer, or null', 'Respond with only the JSON object, no other text.'"
+  solution={`
+PROMPT_V2 = """Classify this customer support ticket.
+
+Return a JSON object with exactly these keys:
+- "category": exactly one of shipping_delay, damaged_item, refund_request, billing, product_question, account
+- "urgency": one of low, medium, high
+- "order_id": the order number as an integer, or null if none is mentioned
+
+Respond with only the JSON object, no other text.
+
+Ticket: {text}"""
+
+evaluate(PROMPT_V2, eval_set)
+`}
+/>
+
+Format problems are mostly gone; what remains are genuine mistakes. The next lever is **few-shot examples**: show the model a handful of solved cases, especially confusable ones (a refund request that mentions a late delivery is still a refund request).
+
+<PyCell code={`
+PROMPT_V3 = PROMPT_V2.replace("Ticket: {text}", """Examples:
+
+Ticket: I returned the lamp two weeks ago because it arrived late, and I still have no refund.
+{{"category": "refund_request", "urgency": "medium", "order_id": null}}
+
+Ticket: Order #104233 arrived with a cracked lid. Please send a replacement.
+{{"category": "damaged_item", "urgency": "medium", "order_id": 104233}}
+
+Ticket: I was charged twice for Bramble Plus this month.
+{{"category": "billing", "urgency": "high", "order_id": null}}
+
+Ticket: {text}""")
+
+results = pd.DataFrame({name: evaluate(p, eval_set) for name, p in [("v1: bare", PROMPT_V1), ("v2: schema + JSON only", PROMPT_V2), ("v3: + examples", PROMPT_V3)]}).T
+results.round(3)
+`} />
+
+Keep this table. Every prompt change, model change or provider change gets a new row, measured on the same examples. That is the whole discipline, and it is the same one you use for any model: **no change ships without a number**.
+
+## Where does it still fail?
+
+An overall accuracy hides which mistakes are being made. A confusion matrix on the evaluation set shows them, and tells you which examples to add next.
+
+<PyCell code={`
+model = dsw.FakeLLM()
+predicted = [validate(parse_reply(model.complete(PROMPT_V3.format(text=t)))) for t in eval_set["text"]]
+eval_set["predicted"] = [p.category if p else "(invalid)" for p in predicted]
+
+pd.crosstab(eval_set["category"], eval_set["predicted"], rownames=["true"], colnames=["predicted"])
+`} />
+
+<PyCell code={`
+wrong = eval_set[eval_set["category"] != eval_set["predicted"]]
+for _, row in wrong.head(4).iterrows():
+    print(f"true={row['category']:<17} predicted={row['predicted']:<17} {row['text'][:90]}")
+`} />
+
+Read the failures, not just the counts. Reading twenty wrong cases is the fastest way to find a mislabelled example, an ambiguous category definition, or the instruction you forgot.
+
+## Retries, and what remains invalid
+
+A small share of replies is still unusable (cut off at the token limit, for instance). In production you **retry** those, and send anything that still fails to a human queue instead of guessing.
+
+<PyCell code={`
+def classify(text: str, template: str = PROMPT_V3, max_attempts: int = 3) -> tuple[TicketLabel | None, int]:
+    for attempt in range(max_attempts):
+        reply = dsw.FakeLLM(seed=attempt).complete(template.format(text=text))   # a real API call varies by itself
+        label = validate(parse_reply(reply))
+        if label is not None:
+            return label, attempt + 1
+    return None, max_attempts
+
+out = [classify(t) for t in eval_set["text"]]
+attempts = pd.Series([n for _, n in out])
+print("attempts needed:", attempts.value_counts().sort_index().to_dict())
+print("still invalid after retries:", sum(label is None for label, _ in out), "-> route to manual review")
+`} />
+
+## What will it cost?
+
+Hosted models charge per token, separately for input and output, and a token is roughly four characters of English. Estimate before you promise anything; few-shot examples make every single call longer.
+
+<PyCell code={`
+# Example prices in USD per million tokens. Prices change: check your provider's pricing page.
+PRICES = {"large model": (4.00, 20.00), "small model": (0.10, 0.50)}
+MONTHLY_TICKETS = 40_000
+
+rows = []
+for name, template in [("v2: schema + JSON only", PROMPT_V2), ("v3: + examples", PROMPT_V3)]:
+    m = dsw.FakeLLM()
+    for t in eval_set["text"]:
+        m.complete(template.format(text=t))
+    tokens_in, tokens_out = m.input_tokens / m.calls, m.output_tokens / m.calls
+    for model_name, (price_in, price_out) in PRICES.items():
+        monthly = MONTHLY_TICKETS * (tokens_in * price_in + tokens_out * price_out) / 1e6
+        rows.append({"prompt": name, "model": model_name, "tokens in": round(tokens_in), "tokens out": round(tokens_out), "USD per month": round(monthly, 2)})
+pd.DataFrame(rows)
+`} />
+
+For a task this simple the cost difference between model sizes is large and the quality difference may be nil. You find out by running **both through the same evaluation set**, which is another row in the results table, not an opinion.
+
+## Do you need an LLM at all?
+
+If you already have a few thousand labelled examples, a classical text classifier is cheaper, faster and fully under your control. Always run this baseline:
+
+<PyCell code={`
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+
+train_tickets = tickets[~tickets["ticket_id"].isin(eval_set["ticket_id"])].sample(2000, random_state=0)
+clf = make_pipeline(TfidfVectorizer(ngram_range=(1, 2), min_df=2), LogisticRegression(max_iter=1000))
+clf.fit(train_tickets["text"], train_tickets["category"])
+print(f"TF-IDF + logistic regression accuracy: {clf.score(eval_set['text'], eval_set['category']):.3f}   (LLM, best prompt: {results['accuracy'].max():.3f})")
+`} />
+
+With 2,000 labels on tidy, repetitive tickets, the classical model wins outright. LLMs earn their cost when you have **no labels yet**, when the categories change often, when the text is varied and messy, or when the task is extraction or summarisation rather than classification. A common pattern is to use both: an LLM to label the first few thousand examples (spot-checked by a person), then a small classical model in production.
+
+<Lab title="Run it against a real model" time="20 min">
+
+Swap the stand-in for a real API. This uses Anthropic's Python SDK; other providers follow the same shape. Create an API key in your provider's console and expose it as an environment variable; never paste a key into a notebook or commit it.
+
+```bash
+uv add anthropic pydantic
+export ANTHROPIC_API_KEY=...   # from your secrets manager or shell profile
+```
+
+Modern APIs can **enforce your schema** on the model's side, which removes most of the parsing problems you handled by hand above. With the SDK you pass the pydantic model directly:
+
+```python
+import anthropic
+from typing import Literal
+from pydantic import BaseModel
+
+class TicketLabel(BaseModel):
+    category: Literal["shipping_delay", "damaged_item", "refund_request", "billing", "product_question", "account"]
+    urgency: Literal["low", "medium", "high"]
+    order_id: int | None
+
+client = anthropic.Anthropic()   # reads ANTHROPIC_API_KEY
+
+def classify(text: str) -> TicketLabel | None:
+    response = client.messages.parse(
+        model="claude-opus-5-5",
+        max_tokens=16000,
+        system="You label customer-support tickets for an online home-goods retailer.",
+        messages=[{"role": "user", "content": f"Classify this ticket.\n\nTicket: {text}"}],
+        output_format=TicketLabel,
+    )
+    # response.usage.input_tokens and .output_tokens are the real token counts: log them for costing
+    if response.stop_reason != "end_turn":   # e.g. "max_tokens" or "refusal": treat as no label
+        return None
+    return response.parsed_output
+
+print(classify("Order #104233 arrived with a cracked lid. Please send a replacement."))
+```
+
+Then do the work of this lesson for real:
+
+1. Run your 300-ticket evaluation set through `classify` (write `data/tickets.parquet` with `dsw.export`) and add a row to your results table.
+2. Repeat with a smaller, cheaper model from the provider's current model list (for Anthropic, `claude-haiku-5-5`) and compare accuracy, latency and cost per 1,000 tickets. Choose with the numbers.
+3. For bulk, non-urgent jobs (re-labelling a year of tickets), use the provider's **batch** endpoint (`client.messages.batches.create(...)`): results arrive asynchronously at about half the price.
+4. Before sending real customer text to any external API, confirm with your security or legal team that the provider and its data-retention terms are approved, and strip personal data you don't need.
+
+</Lab>

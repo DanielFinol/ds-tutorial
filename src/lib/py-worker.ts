@@ -54,12 +54,12 @@ def _ds_figures():
     return out
 
 def _ds_format_error(e):
-    # Hide Pyodide/runner internals so learners only see frames from their own code.
+    # Show only the frames from the learner's own code, then the error itself:
+    # library and runtime internals make tracebacks long and hard to read.
     tb = traceback.TracebackException.from_exception(e)
-    tb.stack = traceback.StackSummary.from_list(
-        [f for f in tb.stack if "_pyodide" not in f.filename and f.name != "_ds_run"]
-    )
-    return "".join(tb.format())
+    own = [f for f in tb.stack if f.filename == "<exec>" and f.name not in ("_ds_run", "_ds_check")]
+    tb.stack = traceback.StackSummary.from_list(own or list(tb.stack)[-1:])
+    return "".join(tb.format(chain=False))
 
 def _ds_display(val):
     if val is None:
@@ -118,6 +118,7 @@ const IMPLIED: [RegExp, string[]][] = [
   [/register_duckdb/, ['duckdb']],
   [/\.plot\b|\.hist\(/, ['matplotlib']],
   [/smf\.|statsmodels/, ['statsmodels']],
+  [/run_pytest/, ['pytest']],
 ];
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

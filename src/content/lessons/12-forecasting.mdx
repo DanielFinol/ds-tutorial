@@ -1,0 +1,296 @@
+---
+title: "Forecasting demand"
+description: "Prepare a daily series, beat the seasonal-naive baseline with a feature-based model, backtest honestly, and deliver a range instead of a single number."
+module: "Predictive modelling"
+order: 12
+minutes: 35
+tools: ["pandas", "scikit-learn", "statsmodels"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+Forecasting is one of the most common requests a data scientist gets, and most of the value comes from routine, not from exotic models: **a clean series, a strong baseline, a backtest, and an honest range**.
+
+> **Sam (Supply chain):** I need daily unit forecasts for Kitchen for the next four weeks to plan warehouse shifts. And how wrong could it be?
+
+<PyCell code={`
+import dsw
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+demand = dsw.load("daily_demand")
+print(demand.groupby("category")["date"].agg(["min", "max", "count"]))
+demand.head()
+`} />
+
+## 1. Make the series regular
+
+Models and rolling windows assume one row per day. Real feeds have holes: days the export failed, or days with zero sales that were never written. Count before you trust.
+
+<PyCell code={`
+expected_days = pd.date_range(demand["date"].min(), demand["date"].max(), freq="D").size
+print("expected days per category:", expected_days)
+print(demand.groupby("category").size())
+`} />
+
+**1.** Bedding is short of rows. Build `bedding`: a Series of Bedding `units` indexed by date with a **complete daily index** (missing days appear as `NaN`). Store the number of missing days in `n_missing`, then fill them by linear interpolation into `bedding_filled`.
+
+<PyCell
+  code={`
+bedding = ...
+n_missing = ...
+bedding_filled = ...
+
+print(n_missing, "missing days:", list(bedding[bedding.isna()].index.strftime("%Y-%m-%d")))
+`}
+  check={`
+_b = demand[demand["category"] == "Bedding"].set_index("date")["units"].asfreq("D")
+assert isinstance(bedding, pd.Series) and len(bedding) == len(_b), f"bedding should have one entry per calendar day ({len(_b)}); use .asfreq('D')"
+assert n_missing == 3, "n_missing = bedding.isna().sum()"
+assert isinstance(bedding_filled, pd.Series) and bedding_filled.notna().all(), "bedding_filled should have no missing values: bedding.interpolate()"
+assert np.allclose(bedding_filled, _b.interpolate()), "fill with linear interpolation: bedding.interpolate()"
+`}
+  hint="`demand[demand['category'] == 'Bedding'].set_index('date')['units'].asfreq('D')`, then `.isna().sum()` and `.interpolate()`."
+  solution={`
+bedding = demand[demand["category"] == "Bedding"].set_index("date")["units"].asfreq("D")
+n_missing = bedding.isna().sum()
+bedding_filled = bedding.interpolate()
+
+print(n_missing, "missing days:", list(bedding[bedding.isna()].index.strftime("%Y-%m-%d")))
+`}
+/>
+
+A different trap sits in Outdoor: three days of **zero** units in June. Those were a stock-out. Sales were zero; *demand* was not. Train on them and the model learns that mid-June demand collapses. Treat such days as missing, not as zeros, and ask the operations team for the stock-out log.
+
+<PyCell code={`
+outdoor = demand[demand["category"] == "Outdoor"].set_index("date")["units"]
+outdoor.loc["2024-06-08":"2024-06-16"].to_frame().T
+`} />
+
+## 2. Know the patterns
+
+<PyCell code={`
+kitchen = demand[demand["category"] == "Kitchen"].set_index("date").asfreq("D")
+y = kitchen["units"]
+
+fig, axes = plt.subplots(1, 3, figsize=(11, 3))
+y.rolling(28).mean().plot(ax=axes[0], title="Trend and yearly season (28-day mean)", xlabel="")
+y.groupby(y.index.dayofweek).mean().plot.bar(ax=axes[1], title="Day of week (0 = Monday)", xlabel="")
+kitchen.groupby("on_promo")["units"].mean().plot.bar(ax=axes[2], title="Promo days vs normal days", xlabel="on_promo")
+fig.tight_layout()
+`} />
+
+Growth, a strong weekly cycle, a November-December peak and a promotion lift. Any forecast has to respect all four.
+
+## 3. The baseline comes first
+
+The **seasonal-naive** forecast repeats the last observed week. It costs nothing, is often hard to beat, and tells you what "good" means for this series. For the error, use **WAPE** (total absolute error divided by total actual units): unlike MAPE it is stable when some days are small, and "we're off by 15% of volume" is something Sam can use.
+
+<PyCell code={`
+def wape(actual, predicted) -> float:
+    actual, predicted = np.asarray(actual, dtype=float), np.asarray(predicted, dtype=float)
+    return np.abs(actual - predicted).sum() / actual.sum()
+
+HORIZON = 28
+train_y, test_y = y.iloc[:-HORIZON], y.iloc[-HORIZON:]
+print("train:", train_y.index.min().date(), "to", train_y.index.max().date(), "| test:", test_y.index.min().date(), "to", test_y.index.max().date())
+`} />
+
+**2.** Build `naive`: a Series indexed like `test_y` that repeats the **last 7 days of `train_y`** four times. Store its error in `wape_naive`.
+
+<PyCell
+  code={`
+naive = ...
+wape_naive = ...
+print(f"seasonal naive WAPE: {wape_naive:.1%}")
+`}
+  check={`
+_n = np.tile(train_y.iloc[-7:].to_numpy(), 4)
+assert isinstance(naive, pd.Series) and naive.index.equals(test_y.index), "naive should be a Series with the same index as test_y"
+assert np.allclose(naive.to_numpy(dtype=float), _n), "repeat the last 7 training values four times: np.tile(train_y.iloc[-7:].to_numpy(), 4)"
+assert abs(wape_naive - wape(test_y, _n)) < 1e-9, "wape_naive = wape(test_y, naive)"
+`}
+  hint="`pd.Series(np.tile(train_y.iloc[-7:].to_numpy(), HORIZON // 7), index=test_y.index)`"
+  solution={`
+naive = pd.Series(np.tile(train_y.iloc[-7:].to_numpy(), HORIZON // 7), index=test_y.index)
+wape_naive = wape(test_y, naive)
+print(f"seasonal naive WAPE: {wape_naive:.1%}")
+`}
+/>
+
+## 4. A feature-based model
+
+The workhorse approach in industry treats forecasting as regression on **calendar features, known-in-advance drivers and lagged values**. One rule decides which lags are legal: to forecast 28 days ahead in one go, a feature for day *t* may only use data from day *t − 28* or earlier. Anything more recent is leakage, because you won't have it when you make the forecast.
+
+**3.** Complete `make_features(df)`. It receives the daily Kitchen frame (columns `units`, `on_promo`) and returns a DataFrame with the same index and these columns: `dow` (day of week), `month`, `on_promo` (as 0/1; the promo calendar is planned ahead, so it is known), `lag_28`, `lag_35`, `lag_364` (units that many days earlier) and `roll_28_7` (mean of the 7 days ending 28 days earlier).
+
+<PyCell
+  code={`
+def make_features(df: pd.DataFrame) -> pd.DataFrame:
+    X = pd.DataFrame(index=df.index)
+    X["dow"] = df.index.dayofweek
+    X["month"] = df.index.month
+    X["on_promo"] = df["on_promo"].astype(int)
+    # lag_28, lag_35, lag_364 and roll_28_7
+    return X
+
+X = make_features(kitchen)
+X.tail(3)
+`}
+  check={`
+_o = make_features(kitchen)
+assert list(_o.columns) == ["dow", "month", "on_promo", "lag_28", "lag_35", "lag_364", "roll_28_7"], f"columns should be dow, month, on_promo, lag_28, lag_35, lag_364, roll_28_7; got {list(_o.columns)}"
+_u = kitchen["units"]
+for _k in (28, 35, 364):
+    assert np.allclose(_o[f"lag_{_k}"], _u.shift(_k), equal_nan=True), f"lag_{_k} = df['units'].shift({_k})"
+assert np.allclose(_o["roll_28_7"], _u.shift(28).rolling(7).mean(), equal_nan=True), "roll_28_7 = df['units'].shift(28).rolling(7).mean(): shift first, then roll, so no recent data leaks in"
+`}
+  hint="`X['lag_28'] = df['units'].shift(28)` and likewise for 35 and 364; `X['roll_28_7'] = df['units'].shift(28).rolling(7).mean()`."
+  solution={`
+def make_features(df: pd.DataFrame) -> pd.DataFrame:
+    X = pd.DataFrame(index=df.index)
+    X["dow"] = df.index.dayofweek
+    X["month"] = df.index.month
+    X["on_promo"] = df["on_promo"].astype(int)
+    for k in (28, 35, 364):
+        X[f"lag_{k}"] = df["units"].shift(k)
+    X["roll_28_7"] = df["units"].shift(28).rolling(7).mean()
+    return X
+
+X = make_features(kitchen)
+X.tail(3)
+`}
+/>
+
+Gradient boosting with a Poisson loss suits count data. The first 364 rows have no year-ago lag, so training starts after them.
+
+<PyCell code={`
+from sklearn.ensemble import HistGradientBoostingRegressor
+
+def fit_predict(train_end, horizon=HORIZON):
+    """Train on data before train_end and forecast the following horizon days."""
+    train_end = pd.Timestamp(train_end)
+    fit_rows = (X.index < train_end) & X["lag_364"].notna()
+    test_rows = (X.index >= train_end) & (X.index < train_end + pd.Timedelta(days=horizon))
+    model = HistGradientBoostingRegressor(loss="poisson", learning_rate=0.05, max_iter=300, max_depth=4, random_state=0)
+    model.fit(X[fit_rows], y[fit_rows])
+    return pd.Series(model.predict(X[test_rows]), index=X.index[test_rows])
+
+pred = fit_predict(test_y.index[0])
+print(f"seasonal naive {wape(test_y, naive):.1%}   boosted model {wape(test_y, pred):.1%}")
+
+ax = y.iloc[-70:].plot(label="actual", figsize=(9, 3.2))
+naive.plot(ax=ax, label="seasonal naive", ls=":")
+pred.plot(ax=ax, label="model")
+ax.axvline(test_y.index[0], color="grey", lw=1)
+ax.set_xlabel("")
+ax.legend();
+`} />
+
+A classical alternative that needs no feature engineering is **exponential smoothing** (Holt-Winters), worth having as a second baseline:
+
+<PyCell code={`
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
+ets = ExponentialSmoothing(train_y.astype(float), trend="add", seasonal="add", seasonal_periods=7).fit()
+print(f"Holt-Winters WAPE: {wape(test_y, ets.forecast(HORIZON)):.1%}  (it knows the weekly cycle but nothing about December or promotions)")
+`} />
+
+## 5. Backtest: one test window proves nothing
+
+A single holdout month can flatter or punish a model by luck. A **rolling-origin backtest** repeats the exercise at several past dates, always training only on data before the forecast start.
+
+**4.** Backtest the six 28-day windows starting at the dates in `starts`. For each, compute the WAPE of the seasonal-naive forecast (last 7 days before the start, repeated) and of `fit_predict(start)`. Store the results in `bt`: a DataFrame indexed by start date with columns `naive` and `model`.
+
+<PyCell
+  code={`
+starts = pd.date_range("2024-07-17", periods=6, freq="28D")
+
+rows = {}
+for start in starts:
+    actual = y[start : start + pd.Timedelta(days=HORIZON - 1)]
+    ...   # rows[start] = {"naive": ..., "model": ...}
+
+bt = pd.DataFrame(rows).T
+print(bt.round(3), "\\n\\nmean WAPE:", bt.mean().round(3).to_dict())
+`}
+  check={`
+_rows = {}
+for _s in pd.date_range("2024-07-17", periods=6, freq="28D"):
+    _a = y[_s : _s + pd.Timedelta(days=27)]
+    _rows[_s] = {"naive": wape(_a, np.tile(y[:_s].iloc[:-1].iloc[-7:].to_numpy(), 4)), "model": wape(_a, fit_predict(_s))}
+_e = pd.DataFrame(_rows).T
+assert isinstance(bt, pd.DataFrame) and len(bt) == 6 and {"naive", "model"} <= set(bt.columns), "bt should have 6 rows and columns naive, model"
+assert np.allclose(bt["naive"].to_numpy(dtype=float), _e["naive"].to_numpy(), atol=1e-9), "naive: the 7 days strictly before start (y[y.index < start].iloc[-7:]), repeated 4 times"
+assert np.allclose(bt["model"].to_numpy(dtype=float), _e["model"].to_numpy(), atol=1e-9), "model: wape(actual, fit_predict(start))"
+`}
+  hint="Inside the loop: `last_week = y[y.index < start].iloc[-7:].to_numpy()`; `rows[start] = {'naive': wape(actual, np.tile(last_week, 4)), 'model': wape(actual, fit_predict(start))}`."
+  solution={`
+starts = pd.date_range("2024-07-17", periods=6, freq="28D")
+
+rows = {}
+for start in starts:
+    actual = y[start : start + pd.Timedelta(days=HORIZON - 1)]
+    last_week = y[y.index < start].iloc[-7:].to_numpy()
+    rows[start] = {"naive": wape(actual, np.tile(last_week, 4)), "model": wape(actual, fit_predict(start))}
+
+bt = pd.DataFrame(rows).T
+print(bt.round(3), "\\n\\nmean WAPE:", bt.mean().round(3).to_dict())
+`}
+/>
+
+The model wins on average, but not in every window. That's the realistic picture to report: *"about 16% error on a typical month against 21% for the naive method, ranging from 13% to 20%."* Had you looked at one window only, you could have concluded anything.
+
+## 6. Give a range, not a number
+
+Sam's second question was "how wrong could it be?" Warehouse staffing should be planned against a high-demand scenario, not the average. Train the same model with a **quantile loss** to forecast the 10th and 90th percentiles directly.
+
+<PyCell code={`
+def fit_quantile(q, train_end):
+    train_end = pd.Timestamp(train_end)
+    fit_rows = (X.index < train_end) & X["lag_364"].notna()
+    test_rows = (X.index >= train_end) & (X.index < train_end + pd.Timedelta(days=HORIZON))
+    m = HistGradientBoostingRegressor(loss="quantile", quantile=q, learning_rate=0.05, max_iter=300, max_depth=4, random_state=0)
+    return pd.Series(m.fit(X[fit_rows], y[fit_rows]).predict(X[test_rows]), index=X.index[test_rows])
+
+low, high = fit_quantile(0.1, test_y.index[0]), fit_quantile(0.9, test_y.index[0])
+inside = ((test_y >= low) & (test_y <= high)).mean()
+
+ax = test_y.plot(label="actual", figsize=(9, 3.2), marker="o", ms=3)
+pred.plot(ax=ax, label="forecast")
+ax.fill_between(low.index, low, high, alpha=0.2, label="10th to 90th percentile")
+ax.set_xlabel("")
+ax.legend()
+print(f"{inside:.0%} of actual days fell inside the 80% band; total units: forecast {pred.sum():,.0f}, high scenario {high.sum():,.0f}, actual {test_y.sum():,.0f}")
+`} />
+
+Always check coverage on held-out data, as printed above. If clearly fewer than 80% of days land inside an "80% band", the band is too narrow: say so, or widen it using the errors from your backtest. The message for Sam: *"Plan for about X units over the four weeks; staff for up to Y on peak days."*
+
+<Lab title="Forecast many series with a dedicated library" time="20 min">
+
+At work you rarely forecast one series; you forecast hundreds (every category, every warehouse). Libraries such as **statsforecast** fit and backtest classical models across many series in one call:
+
+```bash
+uv add statsforecast
+```
+
+```python
+import pandas as pd
+from statsforecast import StatsForecast
+from statsforecast.models import AutoETS, SeasonalNaive
+
+df = (
+    pd.read_parquet("data/daily_demand.parquet")
+    .rename(columns={"category": "unique_id", "date": "ds", "units": "y"})[["unique_id", "ds", "y"]]
+)
+# regular daily index per series first (lesson step 1), e.g. with df.set_index("ds").groupby("unique_id")["y"].apply(lambda s: s.asfreq("D").interpolate())
+
+sf = StatsForecast(models=[SeasonalNaive(season_length=7), AutoETS(season_length=7)], freq="D")
+cv = sf.cross_validation(df=df, h=28, step_size=28, n_windows=6)   # rolling-origin backtest for all series
+print(cv.head())
+```
+
+Compute WAPE per series and model from `cv`, and compare with your boosted model on Kitchen. Then decide, per category, whether the extra machinery of the feature-based model is paying for itself. For the Outdoor series, mask the stock-out days first and see how much the June forecast changes.
+
+</Lab>

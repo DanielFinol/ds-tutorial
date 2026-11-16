@@ -502,6 +502,36 @@ def same(result, expected, *, ordered: bool = False, rtol: float = 1e-6) -> None
     assert diff is None, diff
 
 
+def run_pytest(*args: str, quiet_output: bool = False) -> int:
+    """Run pytest in this session and return its exit code (0 = all tests passed).
+    Modules under the current folder are re-imported, so edits to files take effect."""
+    import contextlib
+    import importlib
+    import sys
+
+    import pytest
+
+    here = os.getcwd()
+    for name, mod in list(sys.modules.items()):
+        if getattr(mod, "__file__", None) and str(mod.__file__).startswith(here):
+            del sys.modules[name]
+    # Files edited twice within one second can otherwise be served from stale bytecode.
+    import shutil
+
+    sys.dont_write_bytecode = True
+    for root, dirs, _ in os.walk(here):
+        if "__pycache__" in dirs:
+            shutil.rmtree(os.path.join(root, "__pycache__"), ignore_errors=True)
+    importlib.invalidate_caches()
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    argv = ["-q", "-p", "no:cacheprovider", "--color=no", *args]
+    if quiet_output:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return int(pytest.main(argv))
+    return int(pytest.main(argv))
+
+
 # --------------------------------------------------------------------------- messy export
 @lru_cache(maxsize=None)
 def raw_orders_csv() -> str:

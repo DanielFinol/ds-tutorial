@@ -1,30 +1,30 @@
 import { expect, test } from '@playwright/test';
 
-test('home lists lessons and links to the first one', async ({ page }) => {
+test('home lists all lessons and links to the first one', async ({ page }) => {
   await page.goto('./');
-  await expect(page.getByRole('heading', { level: 1, name: 'Data Science in 2026' })).toBeVisible();
-  await expect(page.locator('a.lesson-card')).toHaveCount(4);
-  await expect(page.getByText('Coming soon').first()).toBeVisible();
-  await page.getByRole('link', { name: 'Start learning' }).click();
-  await expect(page).toHaveURL(/lessons\/01-welcome\/$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Data Science at Work' })).toBeVisible();
+  await expect(page.locator('a.lesson-card')).toHaveCount(15);
+  await expect(page.locator('body')).not.toContainText('2026');
+  await page.getByRole('link', { name: 'Start' }).click();
+  await expect(page).toHaveURL(/lessons\/01-first-ticket\/$/);
 });
 
 test('no horizontal scroll', async ({ page }) => {
-  for (const path of ['./', 'lessons/02-dataframes/']) {
+  for (const path of ['./', 'lessons/02-sql/', 'lessons/15-shipping/']) {
     await page.goto(path);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     expect(overflow, path).toBeLessThanOrEqual(1);
   }
 });
 
-test('PWA manifest and service worker are served', async ({ page, request }) => {
+test('PWA manifest, service worker and data module are served', async ({ page, request }) => {
   await page.goto('./');
   const href = await page.locator('link[rel="manifest"]').getAttribute('href');
   const manifest = await (await request.get(href!)).json();
-  expect(manifest.short_name).toBe('DS 2026');
-  expect((await request.get('sw.js')).ok()).toBe(true);
-  const precache = await (await request.get('precache.json')).json();
-  expect(precache.pages).toContain('lessons/01-welcome/');
+  expect(manifest.short_name).toBe('DS at Work');
+  const sw = await (await request.get('sw.js')).text();
+  expect(sw).toContain('lessons/01-first-ticket/');
+  expect(await (await request.get('dsw.py')).text()).toContain('def churn_snapshot');
 });
 
 test('lessons work offline once the service worker is installed', async ({ page, context }) => {
@@ -36,7 +36,7 @@ test('lessons work offline once the service worker is installed', async ({ page,
       await new Promise((r) => navigator.serviceWorker.addEventListener('controllerchange', r, { once: true }));
   });
   await context.setOffline(true);
-  await page.goto('lessons/03-eda/'); // never visited: must come from the pre-cache
-  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Exploring data with plots');
+  await page.goto('lessons/07-ab-testing/'); // never visited: must come from the pre-cache
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Running and reading A/B tests');
   await context.setOffline(false);
 });

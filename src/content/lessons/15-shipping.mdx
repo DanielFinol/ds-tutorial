@@ -1,0 +1,436 @@
+---
+title: "Shipping and monitoring a model"
+description: "Turn a trained model into a scheduled scoring job with input and output checks, then monitor it: drift detection with PSI and a report that raises alerts."
+module: "Shipping your work"
+order: 15
+minutes: 35
+tools: ["scikit-learn", "joblib", "FastAPI", "Docker"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+A model in a notebook has delivered nothing. In the average workplace "production" rarely means a low-latency service; it usually means a **scheduled batch job**: every Monday, score all active customers and write a table that the CRM tool reads. This lesson builds that job's core, and the monitoring that tells you when to stop trusting it.
+
+<PyCell code={`
+import dsw
+import numpy as np
+import pandas as pd
+import joblib
+import sklearn
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+NUMERIC = ["tenure_days", "recency_days", "orders_total", "orders_90d", "orders_365d", "spend_90d", "spend_365d",
+           "avg_order_value", "discount_share", "refund_rate", "tickets_180d", "neg_tickets_180d", "min_csat_180d", "age", "plus_member"]
+CATEGORICAL = ["channel", "device", "country"]
+FEATURES = NUMERIC + CATEGORICAL
+
+train = dsw.churn_snapshot("2024-04-01")
+model = Pipeline([
+    ("preprocess", ColumnTransformer([
+        ("num", make_pipeline(SimpleImputer(strategy="median"), StandardScaler()), NUMERIC),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), CATEGORICAL),
+    ])),
+    ("clf", LogisticRegression(max_iter=1000)),
+]).fit(train[FEATURES], train["churned"])
+print("trained on", len(train), "customers")
+`} />
+
+## 1. Package the model as an artefact
+
+Save the fitted pipeline together with the facts someone will need in six months: what it was trained on, with which library version, and what inputs it expects.
+
+<PyCell code={`
+bundle = {
+    "model": model,
+    "model_version": "churn-2024-04-01",
+    "trained_on": "2024-04-01",
+    "features": FEATURES,
+    "sklearn_version": sklearn.__version__,
+    "training_reference": train[NUMERIC].describe().loc[["mean", "std"]].round(3).to_dict(),
+}
+joblib.dump(bundle, "churn_model.joblib")
+
+loaded = joblib.load("churn_model.joblib")           # what the scoring job does at start-up
+print(loaded["model_version"], "| sklearn", loaded["sklearn_version"], "|", len(loaded["features"]), "features")
+`} />
+
+## 2. The scoring job
+
+The scoring function is the contract between you and the people who use the scores. It must **refuse bad input loudly** rather than produce plausible garbage, and its output must carry enough metadata to trace any number back to a model and a date.
+
+**1.** Complete `score_customers(snapshot, bundle, scored_at)`. It must:
+
+- raise `ValueError` if any column in `bundle["features"]` is missing from `snapshot`, or if `customer_id` contains duplicates;
+- return a DataFrame with columns `customer_id`, `p_churn`, `risk_decile` (1 = the 10% with the highest risk, 10 = the lowest), `model_version` and `scored_at`.
+
+<PyCell
+  code={`
+def score_customers(snapshot: pd.DataFrame, bundle: dict, scored_at: str) -> pd.DataFrame:
+    missing = [c for c in bundle["features"] if c not in snapshot.columns]
+    if missing:
+        raise ValueError(f"missing feature columns: {missing}")
+    # 1. reject duplicate customer_id
+    # 2. p_churn from bundle["model"].predict_proba(snapshot[bundle["features"]])
+    # 3. risk_decile with pd.qcut on the rank of p_churn (1 = highest risk)
+    ...
+
+scores = score_customers(dsw.churn_snapshot("2024-07-01"), loaded, scored_at="2024-07-01")
+scores.head()
+`}
+  check={`
+_s = dsw.churn_snapshot("2024-07-01")
+_o = score_customers(_s, loaded, scored_at="2024-07-01")
+assert isinstance(_o, pd.DataFrame) and list(_o.columns) == ["customer_id", "p_churn", "risk_decile", "model_version", "scored_at"], f"columns should be customer_id, p_churn, risk_decile, model_version, scored_at; got {list(getattr(_o, 'columns', []))}"
+assert len(_o) == len(_s) and _o["customer_id"].is_unique, "one row per customer"
+assert np.allclose(_o["p_churn"], loaded["model"].predict_proba(_s[loaded["features"]])[:, 1]), "p_churn = predict_proba(...)[:, 1]"
+assert set(_o["risk_decile"].astype(int)) == set(range(1, 11)), "risk_decile should take the values 1 to 10"
+assert _o.groupby(_o["risk_decile"].astype(int))["p_churn"].mean().is_monotonic_decreasing, "decile 1 should hold the highest risk scores"
+assert (_o["model_version"] == loaded["model_version"]).all() and (_o["scored_at"].astype(str) == "2024-07-01").all(), "carry model_version and scored_at on every row"
+for _bad, _why in [(_s.drop(columns=["recency_days"]), "a missing feature column"), (pd.concat([_s, _s.head(2)]), "duplicate customer_id")]:
+    try:
+        score_customers(_bad, loaded, scored_at="2024-07-01")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"{_why} should raise ValueError")
+`}
+  hint="`if snapshot['customer_id'].duplicated().any(): raise ValueError(...)`. Deciles: `pd.qcut(p.rank(method='first', ascending=False), 10, labels=range(1, 11)).astype(int)` where `p` is a Series of probabilities."
+  solution={`
+def score_customers(snapshot: pd.DataFrame, bundle: dict, scored_at: str) -> pd.DataFrame:
+    missing = [c for c in bundle["features"] if c not in snapshot.columns]
+    if missing:
+        raise ValueError(f"missing feature columns: {missing}")
+    if snapshot["customer_id"].duplicated().any():
+        raise ValueError("duplicate customer_id in scoring input")
+
+    p = pd.Series(bundle["model"].predict_proba(snapshot[bundle["features"]])[:, 1], index=snapshot.index)
+    return pd.DataFrame({
+        "customer_id": snapshot["customer_id"],
+        "p_churn": p,
+        "risk_decile": pd.qcut(p.rank(method="first", ascending=False), 10, labels=range(1, 11)).astype(int),
+        "model_version": bundle["model_version"],
+        "scored_at": scored_at,
+    })
+
+scores = score_customers(dsw.churn_snapshot("2024-07-01"), loaded, scored_at="2024-07-01")
+scores.head()
+`}
+/>
+
+The job's last step writes the scores somewhere others can read, **appending** a dated partition instead of overwriting, so that every past run can be audited and re-evaluated once outcomes are known:
+
+<PyCell code={`
+from pathlib import Path
+
+Path("scores").mkdir(exist_ok=True)
+for cutoff in ["2024-07-01", "2024-08-01", "2024-09-01"]:
+    score_customers(dsw.churn_snapshot(cutoff), loaded, scored_at=cutoff).to_parquet(f"scores/scored_at={cutoff}.parquet", index=False)
+
+history = pd.concat(pd.read_parquet(p) for p in sorted(Path("scores").glob("*.parquet")))
+history.groupby("scored_at").agg(customers=("customer_id", "count"), mean_p=("p_churn", "mean"), high_risk=("p_churn", lambda s: (s > 0.7).mean())).round(3)
+`} />
+
+## 3. Monitoring: has the input changed?
+
+Models fail quietly. Nobody gets an error when an upstream team changes a unit, a tracking event stops firing, or the customer mix shifts; the scores just get worse. True outcomes arrive 90 days late here, so the first line of defence is watching the **inputs**.
+
+The standard drift measure in industry is the **Population Stability Index** (PSI): bin a feature using the training data's quantiles, then compare the share of rows per bin between training and now.
+
+`PSI = Σ (actual% − expected%) × ln(actual% / expected%)`
+
+Rule of thumb: below 0.1 stable, 0.1 to 0.2 worth a look, above 0.2 investigate before trusting the scores.
+
+**2.** Implement `psi(expected, actual, bins=10)` for numeric Series. Use bin edges at the quantiles of `expected` (`np.quantile(expected, np.linspace(0, 1, bins + 1))`), de-duplicate the edges, widen the outer edges to ±infinity, ignore missing values, and floor each share at `1e-4` to avoid dividing by zero.
+
+<PyCell
+  code={`
+def psi(expected: pd.Series, actual: pd.Series, bins: int = 10) -> float:
+    expected, actual = expected.dropna().to_numpy(dtype=float), actual.dropna().to_numpy(dtype=float)
+    edges = np.unique(np.quantile(expected, np.linspace(0, 1, bins + 1)))
+    edges[0], edges[-1] = -np.inf, np.inf
+    # share of rows per bin for each sample (np.histogram), floored at 1e-4, then the PSI formula
+    ...
+
+current = dsw.churn_snapshot("2024-10-01")
+print("recency_days:", round(psi(train["recency_days"], current["recency_days"]), 4))
+print("same data:   ", round(psi(train["recency_days"], train["recency_days"]), 4))
+`}
+  check={`
+def _psi(e, a, bins=10):
+    e, a = e.dropna().to_numpy(dtype=float), a.dropna().to_numpy(dtype=float)
+    ed = np.unique(np.quantile(e, np.linspace(0, 1, bins + 1))); ed[0], ed[-1] = -np.inf, np.inf
+    pe = np.clip(np.histogram(e, ed)[0] / len(e), 1e-4, None); pa = np.clip(np.histogram(a, ed)[0] / len(a), 1e-4, None)
+    return float(np.sum((pa - pe) * np.log(pa / pe)))
+_t, _c = dsw.churn_snapshot("2024-04-01"), dsw.churn_snapshot("2024-10-01")
+assert psi(_t["recency_days"], _t["recency_days"]) is not None, "return the PSI value"
+assert abs(psi(_t["recency_days"], _t["recency_days"])) < 1e-12, "PSI of a sample against itself should be 0"
+for _col in ["recency_days", "spend_365d", "age", "orders_90d"]:
+    assert abs(psi(_t[_col], _c[_col]) - _psi(_t[_col], _c[_col])) < 1e-9, f"wrong value for {_col}: shares = np.histogram(x, edges)[0] / len(x), clipped at 1e-4; PSI = sum((a - e) * log(a / e))"
+assert psi(_t["spend_90d"], _t["spend_90d"] * 100) > 1, "a feature multiplied by 100 should produce a very large PSI"
+`}
+  hint="`e = np.clip(np.histogram(expected, edges)[0] / len(expected), 1e-4, None)`, the same for `actual` as `a`, then `float(np.sum((a - e) * np.log(a / e)))`."
+  solution={`
+def psi(expected: pd.Series, actual: pd.Series, bins: int = 10) -> float:
+    expected, actual = expected.dropna().to_numpy(dtype=float), actual.dropna().to_numpy(dtype=float)
+    edges = np.unique(np.quantile(expected, np.linspace(0, 1, bins + 1)))
+    edges[0], edges[-1] = -np.inf, np.inf
+    e = np.clip(np.histogram(expected, edges)[0] / len(expected), 1e-4, None)
+    a = np.clip(np.histogram(actual, edges)[0] / len(actual), 1e-4, None)
+    return float(np.sum((a - e) * np.log(a / e)))
+
+current = dsw.churn_snapshot("2024-10-01")
+print("recency_days:", round(psi(train["recency_days"], current["recency_days"]), 4))
+print("same data:   ", round(psi(train["recency_days"], train["recency_days"]), 4))
+`}
+/>
+
+## 4. A drift report that raises alerts
+
+Now the scenario every data scientist meets eventually. This month's scoring input arrives. Nothing crashed. But an upstream pipeline was "improved" last week:
+
+<PyCell code={`
+incoming = dsw.churn_snapshot("2024-10-01")
+incoming["spend_90d"] = incoming["spend_90d"] * 100            # now reported in cents
+incoming["min_csat_180d"] = np.nan                             # the survey export silently broke
+
+scores_bad = score_customers(incoming, loaded, scored_at="2024-10-01")
+scores_ok = score_customers(dsw.churn_snapshot("2024-10-01"), loaded, scored_at="2024-10-01")
+print(f"job finished without errors; mean score {scores_bad['p_churn'].mean():.3f} (should have been {scores_ok['p_churn'].mean():.3f})")
+print(f"customers whose risk decile changed: {(scores_bad['risk_decile'] != scores_ok['risk_decile']).mean():.0%}")
+`} />
+
+**3.** Write `drift_report(reference, current, features)`. For each numeric feature return its `psi`, the share of missing values in each sample (`missing_ref`, `missing_cur`), and a `status`: `"alert"` if PSI is at least 0.2 **or** the missing share changed by more than 0.1 (ten percentage points), `"watch"` if PSI is at least 0.1, otherwise `"ok"`. Return a DataFrame indexed by feature, sorted by `psi` from highest to lowest.
+
+<PyCell
+  code={`
+def drift_report(reference: pd.DataFrame, current: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    rows = {}
+    for col in features:
+        ...   # rows[col] = {"psi": ..., "missing_ref": ..., "missing_cur": ..., "status": ...}
+    return pd.DataFrame(rows).T.sort_values("psi", ascending=False)
+
+report = drift_report(train, incoming, NUMERIC)
+report[report["status"] != "ok"]
+`}
+  check={`
+_inc = dsw.churn_snapshot("2024-10-01"); _inc["spend_90d"] = _inc["spend_90d"] * 100; _inc["min_csat_180d"] = np.nan
+_r = drift_report(dsw.churn_snapshot("2024-04-01"), _inc, NUMERIC)
+assert isinstance(_r, pd.DataFrame) and {"psi", "missing_ref", "missing_cur", "status"} <= set(_r.columns), "report needs columns psi, missing_ref, missing_cur, status"
+assert set(_r.index) == set(NUMERIC), "one row per feature, indexed by feature name"
+assert _r.loc["spend_90d", "status"] == "alert", "spend_90d (unit changed) should be an alert"
+assert _r.loc["min_csat_180d", "status"] == "alert", "min_csat_180d went entirely missing: a change in missing share above 0.1 should be an alert even though its PSI cannot be computed reliably"
+assert _r.loc["tenure_days", "status"] in ("ok", "watch", "alert") and _r.loc["age", "status"] == "ok", "unchanged features such as age should be ok"
+_clean = drift_report(dsw.churn_snapshot("2024-04-01"), dsw.churn_snapshot("2024-07-01"), NUMERIC)
+assert (_clean.loc[["age", "plus_member", "avg_order_value"], "status"] == "ok").all(), "stable features should be ok on clean data"
+assert _r["psi"].astype(float).fillna(-1).is_monotonic_decreasing, "sort by psi, highest first"
+`}
+  hint="Per column: `m_ref, m_cur = reference[col].isna().mean(), current[col].isna().mean()`; `value = psi(reference[col], current[col]) if current[col].notna().any() else float('nan')`; status is 'alert' if `value >= 0.2 or abs(m_cur - m_ref) > 0.1`, 'watch' if `value >= 0.1`, else 'ok'. Cast booleans with `.astype(float)` before calling psi."
+  solution={`
+def drift_report(reference: pd.DataFrame, current: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    rows = {}
+    for col in features:
+        ref, cur = reference[col].astype(float), current[col].astype(float)
+        m_ref, m_cur = ref.isna().mean(), cur.isna().mean()
+        value = psi(ref, cur) if cur.notna().any() else float("nan")
+        if value >= 0.2 or abs(m_cur - m_ref) > 0.1:
+            status = "alert"
+        elif value >= 0.1:
+            status = "watch"
+        else:
+            status = "ok"
+        rows[col] = {"psi": value, "missing_ref": m_ref, "missing_cur": m_cur, "status": status}
+    return pd.DataFrame(rows).T.sort_values("psi", ascending=False)
+
+report = drift_report(train, incoming, NUMERIC)
+report[report["status"] != "ok"]
+`}
+/>
+
+Wire it into the job as a **gate**: if any feature is in alert, do not publish scores; notify the owner instead. A late campaign is an inconvenience. A campaign aimed at the wrong ten thousand customers costs money and trust.
+
+<PyCell code={`
+def run_scoring_job(snapshot: pd.DataFrame, scored_at: str) -> str:
+    report = drift_report(train, snapshot, NUMERIC)
+    alerts = report.index[report["status"] == "alert"].tolist()
+    if alerts:
+        return f"[{scored_at}] BLOCKED: drift alert on {alerts}. Scores not published; owner notified."
+    scores = score_customers(snapshot, loaded, scored_at=scored_at)
+    scores.to_parquet(f"scores/scored_at={scored_at}.parquet", index=False)
+    return f"[{scored_at}] OK: {len(scores):,} customers scored, mean risk {scores['p_churn'].mean():.3f}"
+
+print(run_scoring_job(dsw.churn_snapshot("2024-10-01"), "2024-10-01"))
+print(run_scoring_job(incoming, "2024-10-08"))
+`} />
+
+## 5. Close the loop when outcomes arrive
+
+Input monitoring is early warning. The real verdict comes when labels mature: 90 days after each scoring run you can compute how the model actually did, from the scores you archived.
+
+<PyCell code={`
+from sklearn.metrics import roc_auc_score
+
+rows = []
+for cutoff in ["2024-07-01", "2024-08-01", "2024-09-01"]:
+    archived = pd.read_parquet(f"scores/scored_at={cutoff}.parquet")
+    outcome = dsw.churn_snapshot(cutoff)[["customer_id", "churned"]]          # known 90 days later
+    joined = archived.merge(outcome, on="customer_id", validate="one_to_one")
+    top = joined[joined["risk_decile"] == 1]
+    rows.append({"scored_at": cutoff, "auc": roc_auc_score(joined["churned"], joined["p_churn"]),
+                 "predicted_rate": joined["p_churn"].mean(), "actual_rate": joined["churned"].mean(), "top_decile_precision": top["churned"].mean()})
+pd.DataFrame(rows).set_index("scored_at").round(3)
+`} />
+
+Put those three numbers on a small dashboard with thresholds agreed in advance (for example: retrain if AUC falls below 0.74 or predicted and actual rates differ by more than five points for two months running). "Retrain when it looks bad" is not a policy; a threshold someone signed off is.
+
+<Lab title="Make it a command-line job and schedule it" time="20 min">
+
+Put the scoring logic in your `bramble` package and give it an entry point that takes the run date as an argument, so any run can be repeated for any date:
+
+```python
+# src/bramble/score.py
+import argparse, logging
+import joblib, pandas as pd
+from bramble.scoring import score_customers, drift_report, build_snapshot   # your functions
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("churn-scoring")
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date", required=True, help="scoring date, YYYY-MM-DD")
+    parser.add_argument("--model", default="churn_model.joblib")
+    parser.add_argument("--out", default="scores")
+    args = parser.parse_args()
+
+    bundle = joblib.load(args.model)
+    snapshot = build_snapshot(args.date)
+    report = drift_report(bundle["reference"], snapshot, bundle["numeric_features"])
+    alerts = report.index[report["status"] == "alert"].tolist()
+    if alerts:
+        log.error("drift alert on %s: scores not published", alerts)
+        return 1                                   # non-zero exit code = the scheduler marks the run as failed
+    scores = score_customers(snapshot, bundle, scored_at=args.date)
+    scores.to_parquet(f"{args.out}/scored_at={args.date}.parquet", index=False)
+    log.info("scored %d customers, mean risk %.3f", len(scores), scores["p_churn"].mean())
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+```bash
+uv run python -m bramble.score --date 2024-10-01
+echo $?        # 0 on success, 1 when blocked
+```
+
+Schedule it with whatever your team already runs. The simplest real options:
+
+```bash
+# cron on a server: every Monday at 06:00
+0 6 * * 1  cd /srv/bramble && uv run python -m bramble.score --date $(date +\%F) >> logs/score.log 2>&1
+```
+
+```yaml
+# .github/workflows/score.yml: a scheduled CI job
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run python -m bramble.score --date $(date +%F)
+```
+
+Larger teams use an orchestrator (Airflow, Dagster, Prefect) for the same thing with retries, dependencies between jobs and a UI. The job itself doesn't change: a command that takes a date, exits non-zero on failure, and can be re-run safely.
+
+</Lab>
+
+<Lab title="Serve it as an API in a container" time="25 min">
+
+When another system needs a score on demand (a support agent opening a customer's page), wrap the same model in a small web service. **FastAPI** validates requests with the pydantic models you met in lesson 13.
+
+```bash
+uv add fastapi "uvicorn[standard]"
+```
+
+```python
+# src/bramble/api.py
+import joblib
+import pandas as pd
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+
+bundle = joblib.load("churn_model.joblib")
+app = FastAPI(title="Churn risk")
+
+class Customer(BaseModel):
+    tenure_days: int = Field(ge=0)
+    recency_days: int = Field(ge=0)
+    orders_total: int = Field(ge=1)
+    orders_90d: float = 0
+    orders_365d: float = 0
+    spend_90d: float = 0
+    spend_365d: float = 0
+    avg_order_value: float
+    discount_share: float = Field(ge=0, le=1)
+    refund_rate: float = Field(ge=0, le=1)
+    tickets_180d: float = 0
+    neg_tickets_180d: float = 0
+    min_csat_180d: float | None = None
+    age: float | None = None
+    plus_member: bool
+    channel: str
+    device: str
+    country: str
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "model_version": bundle["model_version"]}
+
+@app.post("/score")
+def score(customer: Customer):
+    row = pd.DataFrame([customer.model_dump()])[bundle["features"]]
+    return {"p_churn": float(bundle["model"].predict_proba(row)[0, 1]), "model_version": bundle["model_version"]}
+```
+
+```bash
+uv run uvicorn bramble.api:app --reload
+# then open http://127.0.0.1:8000/docs and try /score; send recency_days=-5 and read the 422 response
+```
+
+Package it so it runs identically anywhere with a `Dockerfile`:
+
+```dockerfile
+FROM python:3.13-slim
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --no-install-project
+COPY src ./src
+COPY churn_model.joblib ./
+RUN uv sync --locked --no-dev
+EXPOSE 8000
+CMD ["uv", "run", "uvicorn", "bramble.api:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+```bash
+docker build -t churn-api .
+docker run --rm -p 8000:8000 churn-api
+curl http://localhost:8000/health
+```
+
+The image contains the exact Python, library versions (from `uv.lock`) and model file. That is what "it works on my machine" becomes when it has to work on someone else's.
+
+</Lab>
+
+## Where to go from here
+
+You've now done, hands-on, the core loop of the job: get data with SQL, shape and clean it, analyse and test a change, build and evaluate a model, and ship it with checks. The best next step is to repeat that loop on data from your own work, with the labs' local project as your template. Come back to any lesson for the idioms; the exercises reset from the **Reset** button on each cell.
