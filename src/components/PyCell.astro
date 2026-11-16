@@ -1,89 +1,64 @@
 ---
 /**
- * An editable, runnable Python cell.
+ * An editable, runnable code cell.
  *   <PyCell code={`print("hi")`} />
- *   <PyCell code={`x = ...`} check={`assert x == 42, "x should be 42"`} title="Exercise" />
+ *   <PyCell code={`x = ...`} check={`assert x == 42, "x should be 42"`} solution={`x = 42`} hint="Use `6 * 7`." />
+ *   <PyCell lang="sql" code={`SELECT 1`} />   // runs in DuckDB; the DataFrame is stored in `result`
  */
 interface Props {
   code: string;
   check?: string;
+  solution?: string;
+  hint?: string;
   title?: string;
+  lang?: 'python' | 'sql';
 }
-const { code, check, title } = Astro.props;
-const source = code.replace(/^\n+|\s+$/g, '');
-const rows = Math.min(Math.max(source.split('\n').length, 2), 24);
+const { code, check, solution, hint, title, lang = 'python' } = Astro.props;
+const trim = (s?: string) => s?.replace(/^\n+|\s+$/g, '');
+const source = trim(code)!;
+const isExercise = Boolean(check);
+const label = title ?? (isExercise ? 'Exercise' : lang === 'sql' ? 'SQL' : 'Python');
+// `inline code` in hints
+const hintParts = hint?.split(/(`[^`]+`)/g) ?? [];
 ---
 
-<py-cell class="cell" data-check={check} data-initial={source}>
+<py-cell
+  class:list={['cell', { exercise: isExercise }]}
+  data-lang={lang}
+  data-check={trim(check)}
+  data-solution={trim(solution)}
+  data-initial={source}
+>
   <div class="cell-head">
-    <span class="cell-title">{title ?? (check ? 'Exercise' : 'Python')}</span>
+    <span class="cell-title">{label}<span class="cell-done" aria-label="solved"> ✓</span></span>
     <div class="cell-actions">
       <button type="button" class="btn-ghost" data-reset>Reset</button>
       <button type="button" class="btn" data-run>Run ▶</button>
     </div>
   </div>
-  <textarea wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" rows={rows} aria-label="Python code">{source}</textarea>
+  <div class="cell-editor"><pre class="cell-fallback">{source}</pre></div>
+  {
+    (hint || solution) && (
+      <div class="cell-help">
+        {hint && (
+          <details>
+            <summary>Hint</summary>
+            <p>{hintParts.map((p) => (p.startsWith('`') ? <code>{p.slice(1, -1)}</code> : p))}</p>
+          </details>
+        )}
+        {solution && (
+          <details>
+            <summary>Solution</summary>
+            <pre class="cell-solution">{trim(solution)}</pre>
+            <button type="button" class="btn-ghost" data-use-solution>Copy into editor</button>
+          </details>
+        )}
+      </div>
+    )
+  }
   <div class="cell-out" aria-live="polite" hidden></div>
 </py-cell>
 
 <script>
-  import { runPython } from '../lib/py-client';
-
-  class PyCellElement extends HTMLElement {
-    connectedCallback() {
-      const ta = this.querySelector('textarea')!;
-      const out = this.querySelector<HTMLElement>('.cell-out')!;
-      const runBtn = this.querySelector<HTMLButtonElement>('[data-run]')!;
-      const check = this.dataset.check;
-
-      const run = async () => {
-        runBtn.disabled = true;
-        out.hidden = false;
-        out.className = 'cell-out';
-        out.replaceChildren(Object.assign(document.createElement('p'), { className: 'status', textContent: 'Starting…' }));
-        const r = await runPython(ta.value, {
-          check,
-          onStatus: (s) => (out.querySelector('.status')!.textContent = s),
-        });
-        out.replaceChildren();
-        const pre = (text: string, cls: string) =>
-          out.appendChild(Object.assign(document.createElement('pre'), { className: cls, textContent: text.trimEnd() }));
-        if (r.stdout) pre(r.stdout, 'stdout');
-        if (r.result?.html) {
-          const div = document.createElement('div');
-          div.className = 'html-result';
-          div.innerHTML = r.result.html; // output of the learner's own code (e.g. a pandas table)
-          out.appendChild(div);
-        } else if (r.result?.text) pre(r.result.text, 'result');
-        for (const b64 of r.images) {
-          const img = document.createElement('img');
-          img.src = `data:image/png;base64,${b64}`;
-          img.alt = 'Plot produced by the code above';
-          out.appendChild(img);
-        }
-        if (r.stderr) pre(r.stderr, 'stderr');
-        if (r.error) pre(r.error, 'error');
-        if (r.checkPassed === true) out.classList.add('passed');
-        if (r.checkPassed === true) pre('✓ Nice — that passes the check.', 'success');
-        if (!out.childElementCount) pre('(no output)', 'muted');
-        runBtn.disabled = false;
-      };
-
-      runBtn.addEventListener('click', run);
-      ta.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && (e.shiftKey || e.metaKey || e.ctrlKey)) {
-          e.preventDefault();
-          run();
-        } else if (e.key === 'Tab' && !e.shiftKey) {
-          e.preventDefault();
-          ta.setRangeText('    ', ta.selectionStart, ta.selectionEnd, 'end');
-        }
-      });
-      this.querySelector('[data-reset]')!.addEventListener('click', () => {
-        ta.value = this.dataset.initial ?? '';
-        out.hidden = true;
-      });
-    }
-  }
-  if (!customElements.get('py-cell')) customElements.define('py-cell', PyCellElement);
+  import '../lib/cell';
 </script>

@@ -11,6 +11,13 @@
   --danger: #a3332b;
   --success: #1f7a3e;
   --code-bg: #f6f4ef;
+  --selection: #cfe6de;
+  --tok-keyword: #8a3ea0;
+  --tok-string: #1f6f5c;
+  --tok-number: #b3541e;
+  --tok-comment: #7a807c;
+  --tok-def: #2a5d9f;
+  --lab-bg: #f4efe4;
   --radius: 10px;
   --font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
@@ -30,6 +37,13 @@
     --danger: #f08a80;
     --success: #6fd394;
     --code-bg: #161a18;
+    --selection: #24483d;
+    --tok-keyword: #c792ea;
+    --tok-string: #7fd3b8;
+    --tok-number: #f0a36b;
+    --tok-comment: #7d8782;
+    --tok-def: #82aaff;
+    --lab-bg: #1f1d17;
     color-scheme: dark;
   }
 }
@@ -46,6 +60,13 @@
   --danger: #f08a80;
   --success: #6fd394;
   --code-bg: #161a18;
+  --selection: #24483d;
+  --tok-keyword: #c792ea;
+  --tok-string: #7fd3b8;
+  --tok-number: #f0a36b;
+  --tok-comment: #7d8782;
+  --tok-def: #82aaff;
+  --lab-bg: #1f1d17;
   color-scheme: dark;
 }
 
@@ -94,12 +115,19 @@ blockquote { margin: 1.5em 0; padding: 4px 16px; border-left: 3px solid var(--ac
 .cell-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 8px 6px 14px; background: var(--surface-2); border-bottom: 1px solid var(--border); }
 .cell-title { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
 .cell-actions { display: flex; gap: 6px; }
-.cell textarea {
-  display: block; width: 100%; border: 0; resize: vertical; padding: 12px 14px; margin: 0;
-  font: 14px/1.55 var(--mono); background: var(--code-bg); color: var(--text); tab-size: 4;
-  white-space: pre; overflow-x: auto;
-}
-.cell textarea:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+.cell-fallback { margin: 0; padding: 10px 14px; background: var(--code-bg); min-height: 2.6em; }
+.cell-editor .cm-editor { min-height: 2.6em; }
+.cell.exercise { border-color: var(--accent); }
+.cell.exercise .cell-head { background: var(--accent-soft); }
+.cell.exercise .cell-title { color: var(--accent); }
+.cell-done { display: none; color: var(--success); }
+.cell.is-passed .cell-done { display: inline; }
+.cell-help { display: flex; flex-wrap: wrap; gap: 4px 18px; padding: 6px 14px; border-top: 1px solid var(--border); font-size: 14px; }
+.cell-help details { min-width: 0; }
+.cell-help details[open] { flex-basis: 100%; }
+.cell-help summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+.cell-help p { margin: 6px 0; }
+.cell-solution { background: var(--code-bg); padding: 10px 12px; border-radius: 8px; margin: 8px 0; white-space: pre; overflow-x: auto; }
 .cell-out { border-top: 1px solid var(--border); padding: 10px 14px; overflow-x: auto; }
 .cell-out pre { margin: 0 0 8px; white-space: pre-wrap; word-break: break-word; }
 .cell-out .stderr, .cell-out .error { color: var(--danger); }
@@ -124,3 +152,28 @@ a.lesson-card:hover { border-color: var(--accent); }
 .lesson-meta { color: var(--muted); font-size: 15px; }
 .lesson-footer { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; margin-top: 3em; padding-top: 1.5em; border-top: 1px solid var(--border); }
 .site-footer { color: var(--muted); font-size: 14px; border-top: 1px solid var(--border); padding: 20px 0 40px; }
+
+/* Local labs */
+.lab { margin: 1.8em 0; padding: 4px 18px 8px; border: 1px dashed var(--border); border-left: 4px solid var(--accent); border-radius: var(--radius); background: var(--lab-bg); }
+.lab-head { font-weight: 700; margin: 12px 0 4px; }
+.lab-tag { display: inline-block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent-contrast); background: var(--accent); border-radius: 5px; padding: 1px 7px; margin-right: 6px; vertical-align: 1px; }
+.lab-time { color: var(--muted); font-weight: 400; }
+.lab .astro-code { background: var(--surface) !important; }
+
+article table { display: block; overflow-x: auto; max-width: 100%; margin: 1em 0; }
+article th, article td { text-align: left; vertical-align: top; }
+article li { margin: 0.25em 0; }
+kbd { font-family: var(--mono); font-size: 0.82em; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; background: var(--surface); }
+.html-result { overflow-x: auto; }
+.html-result td, .html-result th { white-space: nowrap; }
+.progress-note { color: var(--muted); font-size: 15px; }
+
+/* Astro's dual-theme code blocks follow the page theme */
+@media (prefers-color-scheme: dark) {
+  .astro-code, .astro-code span { color: var(--shiki-dark) !important; background-color: var(--code-bg) !important; }
+}
+.lesson-card .tools { font-size: 13px; margin-top: 4px; }
+
+/* Code must show the characters you type: no programming ligatures */
+code, pre, .cm-content { font-variant-ligatures: none; font-feature-settings: 'liga' 0, 'calt' 0; }
+.cell-out .muted { white-space: pre-wrap; }

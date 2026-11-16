@@ -1,0 +1,196 @@
+---
+title: "Your first ticket"
+description: "Meet the company and its data, answer a stakeholder's question end to end, and set up your own machine."
+module: "Working with data"
+order: 1
+minutes: 25
+tools: ["pandas", "uv", "JupyterLab"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+You already know the theory. This course is the other half: the tools, habits and gotchas of the day job. Every lesson is a set of realistic tasks on **one company's data**, and you do the work.
+
+How the lessons work:
+
+- **Code cells are live.** Edit them and press **Run ▶** or <kbd>Shift</kbd>+<kbd>Enter</kbd>. Cells on a page share variables, like a notebook, and earlier cells run automatically if you skip ahead.
+- **Exercises are checked.** A green ✓ means your answer is right. Each has a hint and a solution; try first.
+- **"On your machine" boxes** cover tools that can't run in a browser (git, Docker, a real warehouse). Do them: that's where the muscle memory comes from.
+- Your edits and progress are saved in this browser.
+
+## The company
+
+You've just joined **Bramble**, an online home-goods retailer with a paid membership, *Bramble Plus*. The data team's tables are available through a small module, `dsw`. The first run downloads Python, so give it a few seconds.
+
+<PyCell code={`
+import dsw
+
+dsw.tables()
+`} />
+
+The four core tables form a standard retail schema: `customers` 1→N `orders` 1→N `order_items` N→1 `products`.
+
+<PyCell code={`
+customers = dsw.load("customers")
+orders = dsw.load("orders")
+
+print(orders.dtypes, "\\n")
+orders.head()
+`} />
+
+Three things to check on any new table before you query it: its **grain** (what one row is), its **keys** (are they unique?) and its **date range**.
+
+<PyCell code={`
+print("one row per order?     ", orders["order_id"].is_unique)
+print("one row per customer?  ", customers["customer_id"].is_unique)
+print("orders from", orders["order_ts"].min(), "to", orders["order_ts"].max())
+print(orders["status"].value_counts())
+`} />
+
+## A worked ticket
+
+> **Priya (Marketing):** How many orders and how much revenue did each device bring in last December?
+
+Two decisions hide in that sentence. *Revenue* at Bramble means **completed** orders only (cancelled and refunded orders bring in nothing). And "December" on a timestamp column needs a **half-open interval**: `>= "2024-12-01"` and `< "2025-01-01"`.
+
+<PyCell code={`
+december = orders[
+    (orders["status"] == "completed")
+    & (orders["order_ts"] >= "2024-12-01")
+    & (orders["order_ts"] < "2025-01-01")
+]
+
+(
+    december.groupby("device")
+    .agg(orders=("order_id", "count"), revenue=("total", "sum"))
+    .sort_values("revenue", ascending=False)
+)
+`} />
+
+> **Gotcha:** `order_ts <= "2024-12-31"` compares against midnight at the *start* of 31 December and silently drops that whole day. Always use `< first day of the next period`.
+
+## Your turn
+
+> **Priya:** Thanks! For the board deck I need Q4 2024: total revenue, and the split by acquisition channel.
+
+**1.** Compute `q4_revenue`: total revenue from completed orders placed in Q4 2024 (October to December).
+
+<PyCell
+  code={`
+q4 = ...           # completed orders in Q4 2024
+q4_revenue = ...
+q4_revenue
+`}
+  check={`
+_ok = orders[(orders["status"] == "completed") & (orders["order_ts"] >= "2024-10-01") & (orders["order_ts"] < "2025-01-01")]
+_drop31 = _ok[_ok["order_ts"] <= "2024-12-31"]["total"].sum()
+assert not isinstance(q4_revenue, type(...)), "replace the ... placeholders"
+assert abs(float(q4_revenue) - _drop31) > 0.01, "you dropped 31 December: use order_ts < '2025-01-01'"
+assert abs(float(q4_revenue) - _ok["total"].sum()) < 0.01, "filter to status == 'completed' and 2024-10-01 <= order_ts < 2025-01-01, then sum total"
+`}
+  hint="Copy the December filter and widen the dates: `>= '2024-10-01'` and `< '2025-01-01'`."
+  solution={`
+q4 = orders[
+    (orders["status"] == "completed")
+    & (orders["order_ts"] >= "2024-10-01")
+    & (orders["order_ts"] < "2025-01-01")
+]
+q4_revenue = q4["total"].sum()
+q4_revenue
+`}
+/>
+
+**2.** The channel lives on `customers`, so join it on. Build `by_channel`: one row per `channel` with columns `orders`, `revenue` and `aov` (average order value), sorted by revenue, highest first.
+
+Pass `validate="many_to_one"` to `merge`. It makes pandas raise if the right-hand key isn't unique, which is the cheapest protection there is against silently duplicated rows.
+
+<PyCell
+  code={`
+q4_c = q4.merge(customers[["customer_id", "channel"]], on="customer_id", how="left", validate="many_to_one")
+
+by_channel = ...
+by_channel
+`}
+  check={`
+_e = _ok.merge(customers[["customer_id", "channel"]], on="customer_id").groupby("channel").agg(orders=("order_id", "count"), revenue=("total", "sum"), aov=("total", "mean")).sort_values("revenue", ascending=False).reset_index()
+assert not isinstance(by_channel, type(...)), "replace the ... placeholder"
+dsw.same(by_channel, _e, ordered=True)
+`}
+  hint="`groupby('channel').agg(orders=('order_id', 'count'), revenue=('total', 'sum'), aov=('total', 'mean'))`, then `sort_values`."
+  solution={`
+q4_c = q4.merge(customers[["customer_id", "channel"]], on="customer_id", how="left", validate="many_to_one")
+
+by_channel = (
+    q4_c.groupby("channel")
+    .agg(orders=("order_id", "count"), revenue=("total", "sum"), aov=("total", "mean"))
+    .sort_values("revenue", ascending=False)
+)
+by_channel
+`}
+/>
+
+**3.** Before anything leaves your hands, reconcile it. The channel split must add up to the total you computed a different way. Then Priya's inevitable follow-up: *what share of Q4 revenue came from customers who signed up during Q4?* Store it in `new_share` (a fraction between 0 and 1).
+
+<PyCell
+  code={`
+assert abs(by_channel["revenue"].sum() - q4_revenue) < 0.01, "split does not add up to the total!"
+
+new_share = ...
+new_share
+`}
+  check={`
+_m = _ok.merge(customers[["customer_id", "signup_date"]], on="customer_id")
+_e = _m.loc[_m["signup_date"] >= "2024-10-01", "total"].sum() / _m["total"].sum()
+assert not isinstance(new_share, type(...)), "replace the ... placeholder"
+assert 0 <= float(new_share) <= 1, "new_share should be a fraction between 0 and 1"
+assert abs(float(new_share) - _e) < 1e-6, "merge signup_date onto q4, sum total where signup_date >= '2024-10-01', divide by q4_revenue"
+`}
+  hint="Merge `customers[['customer_id', 'signup_date']]` onto `q4`, then divide the revenue of rows with `signup_date >= '2024-10-01'` by `q4_revenue`."
+  solution={`
+assert abs(by_channel["revenue"].sum() - q4_revenue) < 0.01, "split does not add up to the total!"
+
+q4_s = q4.merge(customers[["customer_id", "signup_date"]], on="customer_id", validate="many_to_one")
+new_share = q4_s.loc[q4_s["signup_date"] >= "2024-10-01", "total"].sum() / q4_revenue
+new_share
+`}
+/>
+
+## Send the answer
+
+A good reply states the number, the definition behind it, and anything the reader could trip over. Run this to draft yours from the variables above.
+
+<PyCell code={`
+top = by_channel.index[0] if by_channel.index.name == "channel" else by_channel["channel"].iloc[0]
+print(f"""Hi Priya,
+
+Q4 2024 revenue was \${q4_revenue:,.0f} from {len(q4):,} completed orders.
+{top.replace("_", " ").capitalize()} was the largest channel; the full split is attached.
+{new_share:.0%} of Q4 revenue came from customers who signed up during the quarter.
+
+Definitions: revenue = order total incl. shipping, completed orders only
+(cancelled and refunded excluded), by order date, 1 Oct to 31 Dec inclusive.
+Channel = the customer's acquisition channel, not the channel of the order.
+""")
+by_channel.round(2).to_csv("q4_by_channel.csv")
+`} />
+
+That last definition matters. "Revenue by channel" could equally mean the channel that drove each *order*. When a request is ambiguous, pick the reading you can defend, **say which one you picked**, and move on.
+
+<Lab title="Set up your own environment" time="15 min">
+
+In the modern workplace, Python projects are managed with **uv**: it installs Python itself, resolves dependencies in seconds and records exact versions in a lockfile. Install it from [docs.astral.sh/uv](https://docs.astral.sh/uv/), then:
+
+```bash
+uv init bramble-analysis
+cd bramble-analysis
+uv add pandas duckdb polars pyarrow scikit-learn statsmodels matplotlib jupyterlab
+curl -O https://danielfinol.github.io/ds-tutorial/dsw.py
+uv run python -c "import dsw; print(dsw.export('data'))"
+uv run jupyter lab
+```
+
+You now have `pyproject.toml` and `uv.lock` (commit both), a `.venv/` (never commit it), and the Bramble tables as files in `data/`. In a new notebook, re-run the Q4 query with `orders = pd.read_parquet("data/orders.parquet")` and confirm you get the same total as above.
+
+Prefer VS Code? Open the folder, install the Python and Jupyter extensions, and pick `.venv` as the interpreter. Both are common; use whichever your team uses.
+
+</Lab>

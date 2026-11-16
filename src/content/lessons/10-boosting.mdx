@@ -1,0 +1,345 @@
+---
+title: "Gradient boosting and tuning"
+description: "Train, regularise and tune gradient-boosted trees with scikit-learn and LightGBM, read what the model learned, and decide whether it beats the simple baseline."
+module: "Predictive modelling"
+order: 10
+minutes: 35
+tools: ["scikit-learn", "LightGBM"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+Gradient-boosted trees are the default strong model for tabular data in industry: they handle mixed scales, missing values and interactions with almost no preprocessing. They also overfit readily and have a dozen knobs. This lesson is the working routine: **fit, check the gap, regularise, tune, interpret, compare with the baseline**.
+
+The setup recreates the churn project from the previous lesson: train on the 1 April snapshot, test out-of-time on 1 July.
+
+<PyCell code={`
+import dsw
+import numpy as np
+import pandas as pd
+from sklearn.metrics import roc_auc_score
+
+train_raw, test_raw = dsw.churn_snapshot("2024-04-01"), dsw.churn_snapshot("2024-07-01")
+y_train, y_test = train_raw["churned"], test_raw["churned"]
+
+def prepare(df: pd.DataFrame) -> pd.DataFrame:
+    """Model inputs for tree models: drop ids/label, add domain features, mark categoricals."""
+    X = df.drop(columns=["customer_id", "churned"]).copy()
+    X["avg_gap_days"] = (X["tenure_days"] - X["recency_days"]).clip(lower=1) / X["orders_total"]
+    X["recency_ratio"] = X["recency_days"] / X["avg_gap_days"]
+    for col in ["channel", "device", "country"]:
+        X[col] = X[col].astype("category")
+    return X
+
+X_train, X_test = prepare(train_raw), prepare(test_raw)
+print(X_train.shape, "missing values:", int(X_train.isna().sum().sum()))
+`} />
+
+The baseline to beat is the logistic-regression pipeline from last lesson:
+
+<PyCell code={`
+from sklearn.compose import ColumnTransformer, make_column_selector
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+baseline = make_pipeline(
+    ColumnTransformer([
+        ("num", make_pipeline(SimpleImputer(strategy="median"), StandardScaler()), make_column_selector(dtype_exclude="category")),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), make_column_selector(dtype_include="category")),
+    ]),
+    LogisticRegression(max_iter=1000),
+).fit(X_train, y_train)
+
+auc_baseline = roc_auc_score(y_test, baseline.predict_proba(X_test)[:, 1])
+print(f"logistic regression: test AUC {auc_baseline:.3f}")
+`} />
+
+## Fit with defaults, then look at the gap
+
+scikit-learn's `HistGradientBoostingClassifier` takes missing values as they are, and `categorical_features="from_dtype"` uses pandas `category` columns natively: no imputer, no scaler, no one-hot encoding.
+
+**1.** Fit `gbm` with default settings (plus `categorical_features="from_dtype"` and `random_state=0`). Store its AUC on the training data in `auc_train` and on the test snapshot in `auc_test`.
+
+<PyCell
+  code={`
+from sklearn.ensemble import HistGradientBoostingClassifier
+
+gbm = ...
+
+auc_train = ...
+auc_test = ...
+print(f"train AUC {auc_train:.3f}   test AUC {auc_test:.3f}   (baseline {auc_baseline:.3f})")
+`}
+  check={`
+from sklearn.ensemble import HistGradientBoostingClassifier as _H
+assert isinstance(gbm, _H), "gbm should be a fitted HistGradientBoostingClassifier"
+assert not isinstance(auc_test, type(...)), "replace the ... placeholders"
+assert abs(auc_train - roc_auc_score(y_train, gbm.predict_proba(X_train)[:, 1])) < 1e-9, "auc_train = roc_auc_score(y_train, gbm.predict_proba(X_train)[:, 1])"
+assert abs(auc_test - roc_auc_score(y_test, gbm.predict_proba(X_test)[:, 1])) < 1e-9, "auc_test = roc_auc_score(y_test, gbm.predict_proba(X_test)[:, 1])"
+assert auc_train - auc_test > 0.1, "with default settings the model should overfit clearly; did you change the hyperparameters?"
+`}
+  hint="`HistGradientBoostingClassifier(categorical_features='from_dtype', random_state=0).fit(X_train, y_train)`, then `roc_auc_score(y, gbm.predict_proba(X)[:, 1])` for each set."
+  solution={`
+from sklearn.ensemble import HistGradientBoostingClassifier
+
+gbm = HistGradientBoostingClassifier(categorical_features="from_dtype", random_state=0).fit(X_train, y_train)
+
+auc_train = roc_auc_score(y_train, gbm.predict_proba(X_train)[:, 1])
+auc_test = roc_auc_score(y_test, gbm.predict_proba(X_test)[:, 1])
+print(f"train AUC {auc_train:.3f}   test AUC {auc_test:.3f}   (baseline {auc_baseline:.3f})")
+`}
+/>
+
+Near-perfect on training data, *worse than logistic regression* on new data. The default 100 trees with up to 31 leaves each memorise a table of four thousand rows. Watch it happen tree by tree:
+
+<PyCell code={`
+import matplotlib.pyplot as plt
+
+tr_curve = [roc_auc_score(y_train, p[:, 1]) for p in gbm.staged_predict_proba(X_train)]
+te_curve = [roc_auc_score(y_test, p[:, 1]) for p in gbm.staged_predict_proba(X_test)]
+
+fig, ax = plt.subplots(figsize=(7, 3.2))
+ax.plot(tr_curve, label="train")
+ax.plot(te_curve, label="test (out-of-time)")
+ax.axhline(auc_baseline, color="grey", ls="--", lw=1, label="logistic baseline")
+ax.set(xlabel="number of trees", ylabel="AUC", title=f"Test AUC peaks at tree {int(np.argmax(te_curve)) + 1}, then declines")
+ax.legend();
+`} />
+
+## Regularise
+
+The knobs that matter, in order of usefulness:
+
+| Parameter | Effect | Typical range |
+| --- | --- | --- |
+| `learning_rate` | smaller steps, needs more trees, generalises better | 0.02 to 0.1 |
+| `max_iter` + `early_stopping` | stop adding trees when a held-out score stops improving | up to 1,000 |
+| `max_depth` / `max_leaf_nodes` | simpler trees | depth 2 to 6 |
+| `min_samples_leaf` | no leaf built on a handful of rows | 20 to 200 |
+| `l2_regularization` | shrinks leaf values | 0 to 10 |
+
+**2.** Fit `gbm_reg` with `learning_rate=0.05`, `max_depth=3`, `min_samples_leaf=40`, `max_iter=500`, and early stopping on a 20% validation split (`early_stopping=True`, `validation_fraction=0.2`), keeping `categorical_features="from_dtype"` and `random_state=0`. Store its test AUC in `auc_reg`.
+
+<PyCell
+  code={`
+gbm_reg = ...
+auc_reg = ...
+
+print(f"stopped after {gbm_reg.n_iter_} trees")
+print(f"train AUC {roc_auc_score(y_train, gbm_reg.predict_proba(X_train)[:, 1]):.3f}   test AUC {auc_reg:.3f}   (baseline {auc_baseline:.3f})")
+`}
+  check={`
+assert isinstance(gbm_reg, _H), "gbm_reg should be a fitted HistGradientBoostingClassifier"
+assert gbm_reg.max_depth == 3 and gbm_reg.learning_rate == 0.05 and gbm_reg.min_samples_leaf == 40, "set learning_rate=0.05, max_depth=3, min_samples_leaf=40"
+assert gbm_reg.early_stopping is True and gbm_reg.n_iter_ < 500, "turn on early_stopping=True with validation_fraction=0.2 and max_iter=500"
+assert abs(auc_reg - roc_auc_score(y_test, gbm_reg.predict_proba(X_test)[:, 1])) < 1e-9, "auc_reg = test AUC of gbm_reg"
+assert auc_reg > auc_test, "the regularised model should beat the default one on the test snapshot"
+`}
+  hint="`HistGradientBoostingClassifier(learning_rate=0.05, max_depth=3, min_samples_leaf=40, max_iter=500, early_stopping=True, validation_fraction=0.2, categorical_features='from_dtype', random_state=0).fit(X_train, y_train)`"
+  solution={`
+gbm_reg = HistGradientBoostingClassifier(
+    learning_rate=0.05,
+    max_depth=3,
+    min_samples_leaf=40,
+    max_iter=500,
+    early_stopping=True,
+    validation_fraction=0.2,
+    categorical_features="from_dtype",
+    random_state=0,
+).fit(X_train, y_train)
+auc_reg = roc_auc_score(y_test, gbm_reg.predict_proba(X_test)[:, 1])
+
+print(f"stopped after {gbm_reg.n_iter_} trees")
+print(f"train AUC {roc_auc_score(y_train, gbm_reg.predict_proba(X_train)[:, 1]):.3f}   test AUC {auc_reg:.3f}   (baseline {auc_baseline:.3f})")
+`}
+/>
+
+The train/test gap has closed and the test score is now level with or slightly above the baseline.
+
+## Tune with cross-validation, never with the test set
+
+Hand-picked values are a starting point. To search properly, score candidates by **cross-validation on the training data** and touch the test snapshot once, at the end. Random search covers a wide space cheaply.
+
+**3.** Run a `RandomizedSearchCV` over `param_distributions` with `n_iter=8`, `cv=3`, `scoring="roc_auc"` and `random_state=0`, on the training data. Store the fitted search in `search` and the best model's test AUC in `auc_tuned`.
+
+<PyCell
+  code={`
+from sklearn.model_selection import RandomizedSearchCV
+
+param_distributions = {
+    "learning_rate": [0.02, 0.05, 0.1],
+    "max_depth": [2, 3, 4],
+    "min_samples_leaf": [20, 40, 80],
+    "l2_regularization": [0.0, 1.0, 5.0],
+    "max_iter": [100, 200, 400],
+}
+candidate = HistGradientBoostingClassifier(categorical_features="from_dtype", random_state=0)
+
+search = ...
+auc_tuned = ...
+
+print("best CV AUC:", round(search.best_score_, 3), search.best_params_)
+print(f"test AUC of the tuned model: {auc_tuned:.3f}")
+`}
+  check={`
+from sklearn.model_selection import RandomizedSearchCV as _R
+assert isinstance(search, _R) and hasattr(search, "best_estimator_"), "search should be a fitted RandomizedSearchCV"
+assert search.scoring == "roc_auc" and search.n_iter == 8 and search.cv == 3, "use n_iter=8, cv=3, scoring='roc_auc'"
+assert abs(auc_tuned - roc_auc_score(y_test, search.best_estimator_.predict_proba(X_test)[:, 1])) < 1e-9, "auc_tuned = test AUC of search.best_estimator_ (or simply search.predict_proba)"
+`}
+  hint="`RandomizedSearchCV(candidate, param_distributions, n_iter=8, cv=3, scoring='roc_auc', random_state=0).fit(X_train, y_train)`; a fitted search predicts with its best model: `search.predict_proba(X_test)`."
+  solution={`
+from sklearn.model_selection import RandomizedSearchCV
+
+param_distributions = {
+    "learning_rate": [0.02, 0.05, 0.1],
+    "max_depth": [2, 3, 4],
+    "min_samples_leaf": [20, 40, 80],
+    "l2_regularization": [0.0, 1.0, 5.0],
+    "max_iter": [100, 200, 400],
+}
+candidate = HistGradientBoostingClassifier(categorical_features="from_dtype", random_state=0)
+
+search = RandomizedSearchCV(candidate, param_distributions, n_iter=8, cv=3, scoring="roc_auc", random_state=0).fit(X_train, y_train)
+auc_tuned = roc_auc_score(y_test, search.predict_proba(X_test)[:, 1])
+
+print("best CV AUC:", round(search.best_score_, 3), search.best_params_)
+print(f"test AUC of the tuned model: {auc_tuned:.3f}")
+`}
+/>
+
+Look at all candidates, not only the winner. When the top few are within noise of each other, as here, prefer the simplest and stop tuning:
+
+<PyCell code={`
+cv = pd.DataFrame(search.cv_results_)
+cols = [c for c in cv.columns if c.startswith("param_")]
+cv[cols + ["mean_test_score", "std_test_score"]].sort_values("mean_test_score", ascending=False).round(4).head(8)
+`} />
+
+## The same model in LightGBM
+
+Many teams use **LightGBM** or **XGBoost** rather than scikit-learn's implementation: they're faster on large data and have more options. The concepts map one to one.
+
+<PyCell code={`
+import lightgbm as lgb
+from sklearn.model_selection import train_test_split
+
+X_fit, X_val, y_fit, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=0, stratify=y_train)
+
+lgbm = lgb.LGBMClassifier(
+    n_estimators=500, learning_rate=0.05, max_depth=3, num_leaves=8, min_child_samples=40,
+    subsample=0.8, subsample_freq=1, colsample_bytree=0.8, random_state=0, verbose=-1,
+)
+lgbm.fit(X_fit, y_fit, eval_set=[(X_val, y_val)], eval_metric="auc", callbacks=[lgb.early_stopping(30, verbose=False)])
+
+print(f"LightGBM stopped at {lgbm.best_iteration_} trees; test AUC {roc_auc_score(y_test, lgbm.predict_proba(X_test)[:, 1]):.3f}")
+`} />
+
+## What did it learn?
+
+Never ship a model whose behaviour you haven't inspected. **Permutation importance** shuffles one feature at a time on held-out data and measures how much the score drops. Unlike built-in "gain" importances, it reflects what the model needs for *new* data.
+
+**4.** Compute permutation importance for `gbm_reg` on the **test** data (`n_repeats=5`, `scoring="roc_auc"`, `random_state=0`). Store a Series of mean importances indexed by feature name, sorted from most to least important, in `imp`.
+
+<PyCell
+  code={`
+from sklearn.inspection import permutation_importance
+
+imp = ...
+imp.head(8).round(4)
+`}
+  check={`
+from sklearn.inspection import permutation_importance as _pi
+assert isinstance(imp, pd.Series) and len(imp) == X_test.shape[1], "imp should be a Series with one value per feature"
+assert set(imp.index) == set(X_test.columns), "index imp by feature name: pd.Series(result.importances_mean, index=X_test.columns)"
+assert imp.is_monotonic_decreasing, "sort imp from most to least important"
+_r = _pi(gbm_reg, X_test, y_test, n_repeats=5, scoring="roc_auc", random_state=0)
+assert np.allclose(imp.sort_index(), pd.Series(_r.importances_mean, index=X_test.columns).sort_index(), atol=1e-9), "use gbm_reg, X_test, y_test, n_repeats=5, scoring='roc_auc', random_state=0"
+`}
+  hint="`r = permutation_importance(gbm_reg, X_test, y_test, n_repeats=5, scoring='roc_auc', random_state=0)` then `pd.Series(r.importances_mean, index=X_test.columns).sort_values(ascending=False)`."
+  solution={`
+from sklearn.inspection import permutation_importance
+
+r = permutation_importance(gbm_reg, X_test, y_test, n_repeats=5, scoring="roc_auc", random_state=0)
+imp = pd.Series(r.importances_mean, index=X_test.columns).sort_values(ascending=False)
+imp.head(8).round(4)
+`}
+/>
+
+Then look at the *shape* of the top relationships with partial dependence: how the predicted risk moves as one feature changes, averaged over the data.
+
+<PyCell code={`
+from sklearn.inspection import partial_dependence
+
+X_pd = X_test.astype({"recency_days": float})   # partial dependence wants float columns
+fig, axes = plt.subplots(1, 2, figsize=(9, 3.2), sharey=True)
+for ax, feature in zip(axes, ["recency_days", "orders_365d"]):
+    pd_result = partial_dependence(gbm_reg, X_pd, [feature], grid_resolution=30)
+    ax.plot(pd_result["grid_values"][0], pd_result["average"][0])
+    ax.set(xlabel=feature, title=f"Predicted churn risk vs {feature}")
+axes[0].set_ylabel("average predicted probability")
+fig.tight_layout()
+`} />
+
+Risk climbs steadily with days since the last order and falls with order frequency: both sensible. Correlated features share importance (recency and `recency_ratio` carry overlapping information), so read importances as groups, not as a strict ranking.
+
+## Decide
+
+<PyCell code={`
+results = pd.Series({
+    "logistic regression (baseline)": auc_baseline,
+    "boosting, defaults": auc_test,
+    "boosting, regularised": auc_reg,
+    "boosting, random search": auc_tuned,
+    "LightGBM, early stopping": roc_auc_score(y_test, lgbm.predict_proba(X_test)[:, 1]),
+}, name="test AUC").round(4)
+results.to_frame()
+`} />
+
+On a few thousand rows with mostly smooth relationships, well-regularised boosting and logistic regression finish within about a hundredth of each other. That is a normal result, and a useful one: the differences are smaller than the noise between test periods, so the choice should be made on **cost of ownership**. The linear model is easier to explain, debug and monitor. Boosting earns its place when there is more data, strong interactions, or many messy features, and you now know how to find out which case you're in.
+
+<Lab title="Explain predictions with SHAP; tune with Optuna" time="20 min">
+
+Two tools you'll meet on most teams, neither available in the browser:
+
+```bash
+uv add shap optuna lightgbm
+```
+
+**SHAP** attributes each individual prediction to features, the standard answer to "why did *this* customer score 0.9?":
+
+```python
+import shap
+
+explainer = shap.TreeExplainer(lgbm)
+values = explainer(X_test)
+shap.plots.beeswarm(values)        # global view: which features push risk up or down
+shap.plots.waterfall(values[0])    # one customer: the reasons behind their score
+```
+
+**Optuna** replaces random search with a guided one and prunes hopeless trials early:
+
+```python
+import optuna
+from sklearn.model_selection import cross_val_score
+
+def objective(trial):
+    model = lgb.LGBMClassifier(
+        n_estimators=300, verbose=-1, random_state=0,
+        learning_rate=trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+        num_leaves=trial.suggest_int("num_leaves", 4, 32),
+        min_child_samples=trial.suggest_int("min_child_samples", 10, 200),
+        reg_lambda=trial.suggest_float("reg_lambda", 1e-3, 10, log=True),
+    )
+    return cross_val_score(model, X_train, y_train, cv=3, scoring="roc_auc").mean()
+
+study = optuna.create_study(direction="maximize")
+study.optimize(objective, n_trials=40)
+print(study.best_value, study.best_params)
+```
+
+Compare the tuned test AUC with the table above. If forty trials buy you less than the gap between two test periods, you have your answer about where to spend the next day of work.
+
+</Lab>

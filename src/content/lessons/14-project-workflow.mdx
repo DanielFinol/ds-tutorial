@@ -1,0 +1,475 @@
+---
+title: "From notebook to project"
+description: "Turn exploratory code into functions, modules and tests; then the team workflow around them: git branches, pull requests, linting and CI."
+module: "Shipping your work"
+order: 14
+minutes: 35
+tools: ["pytest", "git", "ruff", "uv", "GitHub Actions"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+Notebooks are where analysis starts. They are a poor place for it to live: hidden state, no tests, impossible to review. The single biggest step up in professional practice is this routine: **explore in a notebook, then move anything you'll reuse into functions in a module, with tests, under version control.**
+
+This lesson does the Python half in the browser (real `pytest` runs here) and the git half on your machine.
+
+<PyCell code={`
+import dsw
+import pandas as pd
+
+orders = dsw.load("orders")
+`} />
+
+## A notebook cell that grew
+
+This is typical of what accumulates: globals, hard-coded dates, the same filter pasted twice, and a result that depends on which cells ran before it.
+
+<PyCell code={`
+df = orders
+df = df[df["status"] == "completed"]
+df = df[df["order_ts"] >= "2024-10-01"]
+df = df[df["order_ts"] <= "2024-12-31"]            # bug: drops most of 31 December
+df["month"] = df["order_ts"].dt.to_period("M")
+q4 = df.groupby("month")["total"].sum()
+q4
+`} />
+
+## 1. Extract a function
+
+A good analysis function takes everything it needs as **arguments**, returns a value, touches no globals, doesn't modify its inputs, and validates what could plausibly go wrong.
+
+**1.** Write `monthly_revenue(orders, start, end)`. It returns a DataFrame with one row per month and columns `month` (a monthly `Period`), `orders` and `revenue`, for **completed** orders with `start <= order_ts < end` (half-open). It must raise `ValueError` if `start` is not before `end`, and must not modify `orders`.
+
+<PyCell
+  code={`
+def monthly_revenue(orders: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+    """Completed-order count and revenue per month for start <= order_ts < end."""
+    ...
+
+monthly_revenue(orders, "2024-10-01", "2025-01-01")
+`}
+  check={`
+_o = dsw.load("orders")
+_r = monthly_revenue(_o, "2024-10-01", "2025-01-01")
+_c = _o[(_o["status"] == "completed") & (_o["order_ts"] >= "2024-10-01") & (_o["order_ts"] < "2025-01-01")]
+_e = _c.assign(month=_c["order_ts"].dt.to_period("M")).groupby("month").agg(orders=("order_id", "count"), revenue=("total", "sum")).reset_index()
+assert isinstance(_r, pd.DataFrame), "return a DataFrame"
+dsw.same(_r.assign(month=_r["month"].astype(str)) if "month" in _r.columns else _r.reset_index().assign(month=lambda d: d["month"].astype(str)), _e.assign(month=_e["month"].astype(str)))
+assert list(_o.columns) == list(dsw.load("orders").columns), "the function added a column to its input: work on a filtered copy"
+try:
+    monthly_revenue(_o, "2025-01-01", "2024-10-01")
+except ValueError:
+    pass
+else:
+    raise AssertionError("start after end should raise ValueError")
+assert len(monthly_revenue(_o, "2030-01-01", "2030-02-01")) == 0, "a period with no orders should return an empty frame, not fail"
+`}
+  hint="Convert with `pd.Timestamp(start)`; `if start >= end: raise ValueError(...)`; filter with one boolean mask (this gives a new frame, so `.assign(month=...)` is safe); then `groupby('month').agg(orders=('order_id', 'count'), revenue=('total', 'sum')).reset_index()`."
+  solution={`
+def monthly_revenue(orders: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+    """Completed-order count and revenue per month for start <= order_ts < end."""
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    if start >= end:
+        raise ValueError(f"start ({start.date()}) must be before end ({end.date()})")
+    mask = (orders["status"] == "completed") & (orders["order_ts"] >= start) & (orders["order_ts"] < end)
+    return (
+        orders[mask]
+        .assign(month=lambda d: d["order_ts"].dt.to_period("M"))
+        .groupby("month")
+        .agg(orders=("order_id", "count"), revenue=("total", "sum"))
+        .reset_index()
+    )
+
+monthly_revenue(orders, "2024-10-01", "2025-01-01")
+`}
+/>
+
+## 2. Move it into a module
+
+Functions you'll reuse belong in a `.py` file inside a package, where they can be imported by notebooks, scripts and tests alike. A typical small project looks like this:
+
+```text
+bramble-analysis/
+├── pyproject.toml        # dependencies and tool settings (uv)
+├── uv.lock
+├── src/bramble/          # your importable package
+│   ├── __init__.py
+│   └── metrics.py
+├── tests/
+│   └── test_metrics.py
+├── notebooks/            # exploration only; imports from bramble
+└── data/                 # not committed (listed in .gitignore)
+```
+
+The cell below creates the package in this browser session's file system and imports from it, exactly as you would locally.
+
+<PyCell code={`
+from pathlib import Path
+
+Path("bramble").mkdir(exist_ok=True)
+Path("tests").mkdir(exist_ok=True)
+Path("bramble/__init__.py").write_text("")
+Path("bramble/metrics.py").write_text('''"""Business metrics for Bramble."""
+import pandas as pd
+
+
+def monthly_revenue(orders: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+    """Completed-order count and revenue per month for start <= order_ts < end."""
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    if start >= end:
+        raise ValueError(f"start ({start.date()}) must be before end ({end.date()})")
+    mask = (orders["status"] == "completed") & (orders["order_ts"] >= start) & (orders["order_ts"] < end)
+    return (
+        orders[mask]
+        .assign(month=lambda d: d["order_ts"].dt.to_period("M"))
+        .groupby("month")
+        .agg(orders=("order_id", "count"), revenue=("total", "sum"))
+        .reset_index()
+    )
+''')
+print(sorted(str(p) for p in Path(".").rglob("*.py") if "bramble" in str(p)))
+`} />
+
+## 3. Test it
+
+A test builds a **tiny input by hand**, calls the function, and asserts the exact expected output. Hand-made data is the point: you can see the right answer, and every edge case can be planted deliberately. Here is one test to start from, run with real pytest:
+
+<PyCell code={`
+Path("tests/test_metrics.py").write_text('''
+import pandas as pd
+from bramble.metrics import monthly_revenue
+
+
+def make_orders(rows):
+    return pd.DataFrame(rows, columns=["order_id", "order_ts", "status", "total"]).assign(
+        order_ts=lambda d: pd.to_datetime(d["order_ts"])
+    )
+
+
+def test_sums_revenue_per_month():
+    orders = make_orders([
+        (1, "2024-01-10", "completed", 10.0),
+        (2, "2024-01-20", "completed", 5.0),
+        (3, "2024-02-01", "completed", 7.0),
+    ])
+    result = monthly_revenue(orders, "2024-01-01", "2024-03-01")
+    assert result["revenue"].tolist() == [15.0, 7.0]
+    assert result["orders"].tolist() == [2, 1]
+''')
+
+dsw.run_pytest("tests")
+`} />
+
+One passing test proves little. Good tests are the ones that **fail when the code is wrong**. The check for the next exercise does exactly that: it runs your tests against the correct module (they must pass) and against two sabotaged versions (they must fail).
+
+**2.** Extend `TEST_CODE` with tests that would catch these two bugs: (a) a version that forgets to exclude cancelled and refunded orders, and (b) a version that includes orders placed exactly at `end` (`<=` instead of `<`). Also test that a reversed date range raises `ValueError` (use `pytest.raises`).
+
+<PyCell
+  code={`
+TEST_CODE = '''
+import pandas as pd
+import pytest
+from bramble.metrics import monthly_revenue
+
+
+def make_orders(rows):
+    return pd.DataFrame(rows, columns=["order_id", "order_ts", "status", "total"]).assign(
+        order_ts=lambda d: pd.to_datetime(d["order_ts"])
+    )
+
+
+def test_sums_revenue_per_month():
+    orders = make_orders([
+        (1, "2024-01-10", "completed", 10.0),
+        (2, "2024-01-20", "completed", 5.0),
+        (3, "2024-02-01", "completed", 7.0),
+    ])
+    result = monthly_revenue(orders, "2024-01-01", "2024-03-01")
+    assert result["revenue"].tolist() == [15.0, 7.0]
+
+
+# add your tests below
+'''
+
+Path("tests/test_metrics.py").write_text(TEST_CODE)
+dsw.run_pytest("tests")
+`}
+  check={`
+from pathlib import Path as _P
+_good = _P("bramble/metrics.py").read_text()
+assert "<  end" not in _good and "(orders[\\"order_ts\\"] < end)" in _good, "bramble/metrics.py was changed: re-run the cell that writes it"
+_P("tests/test_metrics.py").write_text(TEST_CODE)
+try:
+    assert dsw.run_pytest("tests", quiet_output=True) == 0, "your tests should pass against the correct module (see the pytest output above)"
+    _P("bramble/metrics.py").write_text(_good.replace('(orders["status"] == "completed") & ', ""))
+    assert dsw.run_pytest("tests", quiet_output=True) != 0, "no test fails when cancelled/refunded orders are counted: add a test with a non-completed order and assert it is excluded"
+    _P("bramble/metrics.py").write_text(_good.replace('(orders["order_ts"] < end)', '(orders["order_ts"] <= end)'))
+    assert dsw.run_pytest("tests", quiet_output=True) != 0, "no test fails when an order exactly at the end timestamp is included: add an order at the end date and assert it is excluded"
+    _P("bramble/metrics.py").write_text(_good.replace("    if start >= end:", "    if False:"))
+    assert dsw.run_pytest("tests", quiet_output=True) != 0, "no test fails when the date-range validation is removed: add a pytest.raises(ValueError) test"
+finally:
+    _P("bramble/metrics.py").write_text(_good)
+`}
+  hint="Three small tests: one with a cancelled and a refunded order whose totals must not appear in the result; one with an order at exactly '2024-02-01' when end is '2024-02-01', which must be excluded; one using `with pytest.raises(ValueError): monthly_revenue(orders, '2024-03-01', '2024-01-01')`."
+  solution={`
+TEST_CODE = '''
+import pandas as pd
+import pytest
+from bramble.metrics import monthly_revenue
+
+
+def make_orders(rows):
+    return pd.DataFrame(rows, columns=["order_id", "order_ts", "status", "total"]).assign(
+        order_ts=lambda d: pd.to_datetime(d["order_ts"])
+    )
+
+
+def test_sums_revenue_per_month():
+    orders = make_orders([
+        (1, "2024-01-10", "completed", 10.0),
+        (2, "2024-01-20", "completed", 5.0),
+        (3, "2024-02-01", "completed", 7.0),
+    ])
+    result = monthly_revenue(orders, "2024-01-01", "2024-03-01")
+    assert result["revenue"].tolist() == [15.0, 7.0]
+
+
+def test_only_completed_orders_count():
+    orders = make_orders([
+        (1, "2024-01-10", "completed", 10.0),
+        (2, "2024-01-11", "cancelled", 99.0),
+        (3, "2024-01-12", "refunded", 99.0),
+    ])
+    result = monthly_revenue(orders, "2024-01-01", "2024-02-01")
+    assert result["revenue"].tolist() == [10.0]
+    assert result["orders"].tolist() == [1]
+
+
+def test_end_is_exclusive_and_start_inclusive():
+    orders = make_orders([
+        (1, "2024-01-01", "completed", 1.0),   # exactly at start: included
+        (2, "2024-02-01", "completed", 5.0),   # exactly at end: excluded
+    ])
+    result = monthly_revenue(orders, "2024-01-01", "2024-02-01")
+    assert result["revenue"].tolist() == [1.0]
+
+
+def test_reversed_range_raises():
+    orders = make_orders([(1, "2024-01-10", "completed", 10.0)])
+    with pytest.raises(ValueError):
+        monthly_revenue(orders, "2024-03-01", "2024-01-01")
+'''
+
+Path("tests/test_metrics.py").write_text(TEST_CODE)
+dsw.run_pytest("tests")
+`}
+/>
+
+What to test in data code, in order of value: boundaries of every filter (dates, statuses), empty input, duplicates and missing values in keys, and one small end-to-end case with a hand-computed answer. You do not need to test pandas itself.
+
+## 4. Fix a bug the professional way
+
+A colleague reports that the loyalty team's "top customers" list contains people who refunded everything. The routine: **write a failing test that reproduces the bug, then fix the code until it passes.** The failing tests are already written below.
+
+**3.** Fix `top_customers` so that both tests pass: it must count only **completed** orders, and must return customers sorted by revenue from highest to lowest, with ties broken by the lower `customer_id` first.
+
+<PyCell
+  code={`
+CODE = '''
+import pandas as pd
+
+
+def top_customers(orders: pd.DataFrame, n: int = 3) -> pd.DataFrame:
+    """The n customers with the highest revenue from completed orders."""
+    totals = orders.groupby("customer_id")["total"].sum().reset_index(name="revenue")
+    return totals.sort_values("revenue").head(n).reset_index(drop=True)
+'''
+
+TESTS = '''
+import pandas as pd
+from bramble.loyalty import top_customers
+
+ORDERS = pd.DataFrame({
+    "customer_id": [1, 1, 2, 3, 3, 4, 5],
+    "status": ["completed", "refunded", "completed", "completed", "completed", "cancelled", "completed"],
+    "total": [50.0, 500.0, 80.0, 40.0, 40.0, 900.0, 80.0],
+})
+
+
+def test_ignores_refunded_and_cancelled():
+    result = top_customers(ORDERS, n=5)
+    assert 4 not in result["customer_id"].tolist()
+    assert result.set_index("customer_id").loc[1, "revenue"] == 50.0
+
+
+def test_sorted_by_revenue_then_customer_id():
+    result = top_customers(ORDERS, n=3)
+    assert result["customer_id"].tolist() == [2, 3, 5]
+    assert result["revenue"].tolist() == [80.0, 80.0, 80.0]
+'''
+
+Path("bramble/loyalty.py").write_text(CODE)
+Path("tests/test_loyalty.py").write_text(TESTS)
+dsw.run_pytest("tests/test_loyalty.py")
+`}
+  check={`
+from pathlib import Path as _P
+assert "def top_customers" in CODE, "keep the function name top_customers"
+_P("bramble/loyalty.py").write_text(CODE)
+_P("tests/test_loyalty.py").write_text('''
+import pandas as pd
+from bramble.loyalty import top_customers
+
+ORDERS = pd.DataFrame({
+    "customer_id": [1, 1, 2, 3, 3, 4, 5],
+    "status": ["completed", "refunded", "completed", "completed", "completed", "cancelled", "completed"],
+    "total": [50.0, 500.0, 80.0, 40.0, 40.0, 900.0, 80.0],
+})
+
+
+def test_ignores_refunded_and_cancelled():
+    result = top_customers(ORDERS, n=5)
+    assert 4 not in result["customer_id"].tolist()
+    assert result.set_index("customer_id").loc[1, "revenue"] == 50.0
+
+
+def test_sorted_by_revenue_then_customer_id():
+    result = top_customers(ORDERS, n=3)
+    assert result["customer_id"].tolist() == [2, 3, 5]
+    assert result["revenue"].tolist() == [80.0, 80.0, 80.0]
+
+
+def test_n_limits_rows():
+    assert len(top_customers(ORDERS, n=2)) == 2
+''')
+assert dsw.run_pytest("tests/test_loyalty.py", quiet_output=True) == 0, "the tests still fail: read the pytest output above. Filter to completed orders first, then sort by revenue descending and customer_id ascending."
+`}
+  hint="Filter first: `orders[orders['status'] == 'completed']`. Sort with two keys: `.sort_values(['revenue', 'customer_id'], ascending=[False, True])`."
+  solution={`
+CODE = '''
+import pandas as pd
+
+
+def top_customers(orders: pd.DataFrame, n: int = 3) -> pd.DataFrame:
+    """The n customers with the highest revenue from completed orders."""
+    completed = orders[orders["status"] == "completed"]
+    totals = completed.groupby("customer_id")["total"].sum().reset_index(name="revenue")
+    return totals.sort_values(["revenue", "customer_id"], ascending=[False, True]).head(n).reset_index(drop=True)
+'''
+
+TESTS = '''
+import pandas as pd
+from bramble.loyalty import top_customers
+
+ORDERS = pd.DataFrame({
+    "customer_id": [1, 1, 2, 3, 3, 4, 5],
+    "status": ["completed", "refunded", "completed", "completed", "completed", "cancelled", "completed"],
+    "total": [50.0, 500.0, 80.0, 40.0, 40.0, 900.0, 80.0],
+})
+
+
+def test_ignores_refunded_and_cancelled():
+    result = top_customers(ORDERS, n=5)
+    assert 4 not in result["customer_id"].tolist()
+    assert result.set_index("customer_id").loc[1, "revenue"] == 50.0
+
+
+def test_sorted_by_revenue_then_customer_id():
+    result = top_customers(ORDERS, n=3)
+    assert result["customer_id"].tolist() == [2, 3, 5]
+    assert result["revenue"].tolist() == [80.0, 80.0, 80.0]
+'''
+
+Path("bramble/loyalty.py").write_text(CODE)
+Path("tests/test_loyalty.py").write_text(TESTS)
+dsw.run_pytest("tests/test_loyalty.py")
+`}
+/>
+
+The test stays in the repository forever, so this bug can never quietly return.
+
+<Lab title="The git workflow you'll use every day" time="20 min">
+
+Every team works the same way: **one branch per change, small commits, a pull request, review, merge.** In your `bramble-analysis` project:
+
+```bash
+git init
+printf ".venv/\ndata/\n__pycache__/\n.ipynb_checkpoints/\n*.joblib\n.env\n" > .gitignore
+git add . && git commit -m "Initial project"
+
+git switch -c monthly-revenue-metric          # 1. branch
+mkdir -p src/bramble tests                    # 2. add metrics.py and test_metrics.py from this lesson
+uv add --dev pytest ruff
+uv run pytest                                 # 3. tests pass locally
+git add src tests pyproject.toml uv.lock
+git commit -m "Add monthly_revenue metric with tests"
+git push -u origin monthly-revenue-metric     # 4. then open a pull request on GitHub or GitLab
+```
+
+Things that mark you as someone who has done this before: commits that each do one thing, with a message saying *what and why*; never committing data, credentials or `.venv`; `git pull --rebase` before pushing; and notebooks committed with outputs cleared (`uv run jupyter nbconvert --clear-output --inplace notebooks/*.ipynb`, or the `nbstripout` tool).
+
+To make `from bramble.metrics import ...` work from `src/`, add this to `pyproject.toml` and run `uv sync`:
+
+```toml
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bramble"]
+```
+
+</Lab>
+
+<Lab title="Automate the checks: ruff, pre-commit and CI" time="15 min">
+
+**ruff** is the standard linter and formatter; it replaces flake8, isort and black, and runs in milliseconds:
+
+```bash
+uv run ruff check --fix .     # lint: unused imports, undefined names, likely bugs
+uv run ruff format .          # format: no more style debates in review
+```
+
+Run them automatically before every commit with **pre-commit** (`uv add --dev pre-commit`, then `uv run pre-commit install`), configured in `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.0          # use the latest release tag
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+```
+
+And run the tests on every pull request with **continuous integration**. On GitHub, save this as `.github/workflows/ci.yml`:
+
+```yaml
+name: CI
+on: [pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v6      # use the latest major version
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run pytest
+```
+
+Push a branch with a deliberately failing test and watch the pull request go red. That red cross, visible to the reviewer, is what makes tests worth writing.
+
+</Lab>
+
+## Reviewing a pull request
+
+Half of the workflow is reading other people's changes. A reviewer of data code checks, in this order:
+
+1. **Is it correct?** Join keys and grain, date boundaries, filters, what happens with missing values and empty inputs.
+2. **Is it tested?** A test that would fail if the logic were wrong, not just one that runs.
+3. **Is it reproducible?** No hard-coded local paths, no hidden state, dependencies locked, random seeds set.
+4. **Is it readable?** Names that say what things are; a reader can follow it without the author present.
+5. **Is anything leaking?** No credentials, no customer data in the repository or in notebook outputs.
+
+Comment on the code, not the person; ask questions where you're unsure ("what happens here if `orders` is empty?"); approve when it's better than what's there, not when it's perfect.

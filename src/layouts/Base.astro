@@ -5,9 +5,15 @@ import { url } from '../lib/paths';
 interface Props {
   title: string;
   description?: string;
+  lesson?: string;
 }
-const { title, description = 'Learn modern data science by running real Python in your browser.' } = Astro.props;
-const fullTitle = title === 'Data Science in 2026' ? title : `${title} · Data Science in 2026`;
+const SITE = 'Data Science at Work';
+const {
+  title,
+  description = 'Hands-on practice in the day-to-day skills of a working data scientist. Real Python and SQL, in your browser.',
+  lesson,
+} = Astro.props;
+const fullTitle = title === SITE ? title : `${title} · ${SITE}`;
 ---
 
 <!doctype html>
@@ -23,10 +29,10 @@ const fullTitle = title === 'Data Science in 2026' ? title : `${title} · Data S
     <link rel="manifest" href={url('manifest.webmanifest')} />
     <script src="../lib/pwa.ts"></script>
   </head>
-  <body>
+  <body data-lesson={lesson}>
     <header class="site-header">
       <div class="wrap">
-        <a class="brand" href={url()}>Data Science <span>in 2026</span></a>
+        <a class="brand" href={url()}>Data Science <span>at Work</span></a>
         <nav><a href={url()}>Lessons</a></nav>
       </div>
     </header>
@@ -35,7 +41,7 @@ const fullTitle = title === 'Data Science in 2026' ? title : `${title} · Data S
     </main>
     <footer class="site-footer">
       <div class="wrap">
-        All code runs locally in your browser via Pyodide, with no server and no sign-up. Works offline after your first visit.
+        All code runs locally in your browser (Python via Pyodide, SQL via DuckDB): no server, no sign-up. Your work is saved in this browser. Works offline after your first visit.
       </div>
     </footer>
   </body>

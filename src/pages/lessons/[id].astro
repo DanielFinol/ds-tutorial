@@ -16,11 +16,10 @@ const { lesson, prev, next } = Astro.props;
 const { Content } = await render(lesson);
 ---
 
-<Base title={lesson.data.title} description={lesson.data.description}>
-  <p class="lesson-meta">{lesson.data.module} · Lesson {lesson.data.order} · {lesson.data.minutes} min</p>
+<Base title={lesson.data.title} description={lesson.data.description} lesson={lesson.id}>
+  <p class="lesson-meta">{lesson.data.module} · Lesson {lesson.data.order} · {lesson.data.minutes} min · {lesson.data.tools.join(', ')}</p>
   <h1>{lesson.data.title}</h1>
   <p class="lede">{lesson.data.description}</p>
-  <p class="lesson-meta"><small>Tip: edit any cell, then press <kbd>Shift</kbd>+<kbd>Enter</kbd> to run it. Cells on a page share variables, like a notebook.</small></p>
 
   <article>
     <Content />
@@ -46,5 +45,6 @@ const { Content } = await render(lesson);
     setCompleted(id, !getCompleted().has(id));
     paint();
   });
+  document.addEventListener('dsw:progress', paint);
   paint();
 </script>

@@ -1,5 +1,5 @@
 // Per-viewer lesson progress, kept in localStorage (best effort: may be unavailable).
-const KEY = 'ds2026:completed';
+const KEY = 'dsw:completed';
 
 export function getCompleted(): Set<string> {
   try {

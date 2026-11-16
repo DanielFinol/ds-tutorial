@@ -1,0 +1,284 @@
+---
+title: "Evaluating a model for a decision"
+description: "Go beyond AUC: ranking quality at the volume you can act on, calibration, choosing a threshold from costs and benefits, stability over time, and performance by segment."
+module: "Predictive modelling"
+order: 11
+minutes: 35
+tools: ["scikit-learn", "pandas"]
+---
+import PyCell from '../../components/PyCell.astro';
+import Lab from '../../components/Lab.astro';
+
+"AUC is 0.77" answers a question nobody at the company asked. The retention team's questions are: *if we contact 500 customers, how many will be real churners? Can we trust a score of 0.8 to mean 80%? How many should we contact? Will this still work next quarter?* This lesson turns a fitted model into those answers.
+
+<PyCell code={`
+import dsw
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+numeric = ["tenure_days", "recency_days", "orders_total", "orders_90d", "orders_365d", "spend_90d", "spend_365d",
+           "avg_order_value", "discount_share", "refund_rate", "tickets_180d", "neg_tickets_180d", "min_csat_180d", "age", "plus_member"]
+categorical = ["channel", "device", "country"]
+
+def make_model():
+    return Pipeline([
+        ("preprocess", ColumnTransformer([
+            ("num", make_pipeline(SimpleImputer(strategy="median"), StandardScaler()), numeric),
+            ("cat", OneHotEncoder(handle_unknown="ignore"), categorical),
+        ])),
+        ("clf", LogisticRegression(max_iter=1000)),
+    ])
+
+train, test = dsw.churn_snapshot("2024-04-01"), dsw.churn_snapshot("2024-07-01")
+model = make_model().fit(train, train["churned"])
+
+scored = test[["customer_id", "channel", "recency_days", "churned"]].copy()
+scored["p"] = model.predict_proba(test)[:, 1]
+print(f"{len(scored):,} customers, base churn rate {scored['churned'].mean():.1%}, AUC {roc_auc_score(scored['churned'], scored['p']):.3f}")
+scored.head()
+`} />
+
+## Ranking quality where you act
+
+The retention team can contact a limited number of customers. What matters is how good the **top of the list** is, not the average ranking quality across everyone.
+
+**1.** For the 10% of customers with the highest scores, compute `precision_top10` (the share who really churned) and `lift_top10` (that precision divided by the base churn rate).
+
+<PyCell
+  code={`
+k = len(scored) // 10
+top = ...            # the k highest-scored customers
+
+precision_top10 = ...
+lift_top10 = ...
+print(f"top {k}: {precision_top10:.1%} churn vs {scored['churned'].mean():.1%} overall -> lift {lift_top10:.2f}x")
+`}
+  check={`
+_t = scored.nlargest(len(scored) // 10, "p")
+assert not isinstance(lift_top10, type(...)), "replace the ... placeholders"
+assert abs(precision_top10 - _t["churned"].mean()) < 1e-9, "precision_top10 = mean of churned among the k rows with the highest p (scored.nlargest(k, 'p'))"
+assert abs(lift_top10 - _t["churned"].mean() / scored["churned"].mean()) < 1e-9, "lift_top10 = precision_top10 / overall churn rate"
+`}
+  hint="`top = scored.nlargest(k, 'p')`; precision is `top['churned'].mean()`; lift divides by `scored['churned'].mean()`."
+  solution={`
+k = len(scored) // 10
+top = scored.nlargest(k, "p")
+
+precision_top10 = top["churned"].mean()
+lift_top10 = precision_top10 / scored["churned"].mean()
+print(f"top {k}: {precision_top10:.1%} churn vs {scored['churned'].mean():.1%} overall -> lift {lift_top10:.2f}x")
+`}
+/>
+
+The full picture is a **gains table**: sort by score, cut into ten equal groups, and show what each contains. It's the single most useful evaluation artefact to show a business team.
+
+<PyCell code={`
+gains = (
+    scored.assign(decile=pd.qcut(scored["p"].rank(method="first", ascending=False), 10, labels=range(1, 11)))
+    .groupby("decile", observed=True)
+    .agg(customers=("churned", "size"), churners=("churned", "sum"), churn_rate=("churned", "mean"), min_score=("p", "min"))
+)
+gains["cum_share_of_churners"] = gains["churners"].cumsum() / gains["churners"].sum()
+gains.round(3)
+`} />
+
+Always compare against what the team does today. A common manual rule is "contact everyone who hasn't ordered in 60 days":
+
+<PyCell code={`
+rule = scored[scored["recency_days"] > 60]
+same_volume = scored.nlargest(len(rule), "p")
+print(f"rule 'recency > 60 days': {len(rule):,} customers, {rule['churned'].mean():.1%} are churners")
+print(f"model, same volume:       {len(same_volume):,} customers, {same_volume['churned'].mean():.1%} are churners")
+`} />
+
+The honest headline is the *difference between those two lines*, not the AUC. At this volume the model is no better than the rule the team already uses. Its advantages are at the very top of the list (the first decile above is about 90% churners) and in producing a probability you can do arithmetic with, which the next two sections rely on. Report that plainly: it tells the team exactly what the model is and isn't buying them.
+
+## Calibration: can you trust the number?
+
+If the score is used as a probability (to compute expected value, or shown to an agent as "82% risk"), it must be **calibrated**: among customers scored around 0.8, about 80% should churn.
+
+**2.** Build `calib`: split the scores into 10 equal-sized bins with `pd.qcut(scored["p"], 10, labels=False)`, and for each bin compute `mean_pred` (average score), `observed` (actual churn rate) and `n`. Also compute `brier`, the Brier score (mean squared difference between score and outcome).
+
+<PyCell
+  code={`
+calib = ...
+brier = ...
+
+print(f"Brier score: {brier:.4f} (always predicting the base rate would score {scored['churned'].var(ddof=0):.4f})")
+calib.round(3)
+`}
+  check={`
+_c = scored.assign(bin=pd.qcut(scored["p"], 10, labels=False)).groupby("bin").agg(mean_pred=("p", "mean"), observed=("churned", "mean"), n=("churned", "size")).reset_index()
+assert isinstance(calib, pd.DataFrame) and len(calib) == 10, "calib should have 10 rows, one per score bin"
+dsw.same(calib, _c[["mean_pred", "observed", "n"]])
+assert abs(brier - ((scored["p"] - scored["churned"]) ** 2).mean()) < 1e-9, "brier = ((scored['p'] - scored['churned']) ** 2).mean()"
+`}
+  hint="`scored.assign(bin=pd.qcut(scored['p'], 10, labels=False)).groupby('bin').agg(mean_pred=('p', 'mean'), observed=('churned', 'mean'), n=('churned', 'size'))`"
+  solution={`
+calib = (
+    scored.assign(bin=pd.qcut(scored["p"], 10, labels=False))
+    .groupby("bin")
+    .agg(mean_pred=("p", "mean"), observed=("churned", "mean"), n=("churned", "size"))
+)
+brier = ((scored["p"] - scored["churned"]) ** 2).mean()
+
+print(f"Brier score: {brier:.4f} (always predicting the base rate would score {scored['churned'].var(ddof=0):.4f})")
+calib.round(3)
+`}
+/>
+
+<PyCell code={`
+import matplotlib.pyplot as plt
+
+fig, ax = plt.subplots(figsize=(4.2, 4))
+ax.plot([0, 1], [0, 1], color="grey", ls="--", lw=1, label="perfect")
+ax.plot(calib["mean_pred"], calib["observed"], marker="o", label="model")
+ax.set(xlabel="mean predicted probability", ylabel="observed churn rate", title="Calibration (out-of-time)")
+ax.legend();
+`} />
+
+The points hug the diagonal: these scores can be used as probabilities. Logistic regression is usually well calibrated out of the box; boosted trees and anything trained on re-sampled data often are not, and need `CalibratedClassifierCV` or at least this check.
+
+## How many to contact: a threshold from economics
+
+Never default to 0.5. The cut-off follows from costs and benefits, which you get from the business:
+
+- the win-back offer costs **$8** per customer contacted (voucher and handling);
+- it retains **25%** of the churners it reaches;
+- a retained customer is worth **$120** in margin over the next year;
+- contacting a customer who wasn't going to churn just costs the $8.
+
+**3.** For each targeting depth `k` from 5% to 100% of customers in steps of 5, compute the expected profit of contacting the top `k`% by score: `churners_reached × 0.25 × 120 − customers_contacted × 8`. Store the results in a Series `profit` indexed by `k` (5, 10, ..., 100) and the best depth in `best_k`.
+
+<PyCell
+  code={`
+COST, SAVE_RATE, VALUE = 8, 0.25, 120
+ranked = scored.sort_values("p", ascending=False).reset_index(drop=True)
+
+profit = ...
+best_k = ...
+
+print(f"contact the top {best_k}% -> expected profit \${profit[best_k]:,.0f}; contacting everyone: \${profit[100]:,.0f}")
+`}
+  check={`
+_r = scored.sort_values("p", ascending=False).reset_index(drop=True)
+_e = pd.Series({k: _r.head(int(len(_r) * k / 100))["churned"].sum() * 0.25 * 120 - int(len(_r) * k / 100) * 8 for k in range(5, 101, 5)})
+assert isinstance(profit, pd.Series) and list(profit.index) == list(range(5, 101, 5)), "profit should be a Series indexed by 5, 10, ..., 100"
+assert np.allclose(profit.to_numpy(dtype=float), _e.to_numpy(dtype=float), rtol=0.01), "for each k: n = int(len(ranked) * k / 100); profit = ranked.head(n)['churned'].sum() * SAVE_RATE * VALUE - n * COST"
+assert best_k == _e.idxmax(), "best_k = profit.idxmax()"
+`}
+  hint="Build a dict in a loop or comprehension: `n = int(len(ranked) * k / 100)`, `ranked.head(n)['churned'].sum() * SAVE_RATE * VALUE - n * COST`, then `pd.Series(...)` and `.idxmax()`."
+  solution={`
+COST, SAVE_RATE, VALUE = 8, 0.25, 120
+ranked = scored.sort_values("p", ascending=False).reset_index(drop=True)
+
+profit = pd.Series({
+    k: ranked.head(int(len(ranked) * k / 100))["churned"].sum() * SAVE_RATE * VALUE - int(len(ranked) * k / 100) * COST
+    for k in range(5, 101, 5)
+})
+best_k = profit.idxmax()
+
+print(f"contact the top {best_k}% -> expected profit \${profit[best_k]:,.0f}; contacting everyone: \${profit[100]:,.0f}")
+`}
+/>
+
+Because the scores are calibrated, the same answer falls out of arithmetic: contact a customer when `p × 0.25 × 120 > 8`, that is when **p > 0.27**. Check where that threshold sits in your gains table. State the assumptions with the recommendation: if the save rate were 10% instead of 25%, the break-even would be p > 0.67 and the campaign would shrink to roughly the top quarter.
+
+> The 25% save rate is itself an assumption until tested. The right launch plan holds out a random control group that gets no offer, so the *incremental* effect can be measured: the A/B test from lesson 7.
+
+## Will it last? Stability over time
+
+A model is trained once and used for months. Evaluate it the way it will be used: on **later periods than it was trained on**, watching both ranking quality and whether its average prediction still matches reality.
+
+**4.** Train a model on the **1 January 2024** snapshot with `make_model()`. Evaluate it on the snapshots of 1 April, 1 July and 1 October 2024. Build `drift`: one row per cutoff (index: the cutoff strings) with columns `auc`, `mean_pred` (average predicted probability) and `actual` (actual churn rate).
+
+<PyCell
+  code={`
+jan = dsw.churn_snapshot("2024-01-01")
+old_model = make_model().fit(jan, jan["churned"])
+
+rows = {}
+for cutoff in ["2024-04-01", "2024-07-01", "2024-10-01"]:
+    snap = dsw.churn_snapshot(cutoff)
+    ...   # rows[cutoff] = {"auc": ..., "mean_pred": ..., "actual": ...}
+
+drift = pd.DataFrame(rows).T
+drift.round(3)
+`}
+  check={`
+_m = make_model().fit(dsw.churn_snapshot("2024-01-01"), dsw.churn_snapshot("2024-01-01")["churned"])
+_rows = {}
+for _c in ["2024-04-01", "2024-07-01", "2024-10-01"]:
+    _s = dsw.churn_snapshot(_c); _p = _m.predict_proba(_s)[:, 1]
+    _rows[_c] = {"auc": roc_auc_score(_s["churned"], _p), "mean_pred": _p.mean(), "actual": _s["churned"].mean()}
+_e = pd.DataFrame(_rows).T
+assert isinstance(drift, pd.DataFrame) and list(drift.index) == list(_e.index), "drift should have one row per cutoff, indexed by the cutoff string"
+assert {"auc", "mean_pred", "actual"} <= set(drift.columns), "drift needs columns auc, mean_pred, actual"
+assert np.allclose(drift[["auc", "mean_pred", "actual"]].to_numpy(dtype=float), _e.to_numpy(dtype=float), atol=1e-6), "for each snapshot: p = old_model.predict_proba(snap)[:, 1]; auc = roc_auc_score(snap['churned'], p); mean_pred = p.mean(); actual = snap['churned'].mean()"
+`}
+  hint="Inside the loop: `p = old_model.predict_proba(snap)[:, 1]`, then `rows[cutoff] = {'auc': roc_auc_score(snap['churned'], p), 'mean_pred': p.mean(), 'actual': snap['churned'].mean()}`."
+  solution={`
+jan = dsw.churn_snapshot("2024-01-01")
+old_model = make_model().fit(jan, jan["churned"])
+
+rows = {}
+for cutoff in ["2024-04-01", "2024-07-01", "2024-10-01"]:
+    snap = dsw.churn_snapshot(cutoff)
+    p = old_model.predict_proba(snap)[:, 1]
+    rows[cutoff] = {"auc": roc_auc_score(snap["churned"], p), "mean_pred": p.mean(), "actual": snap["churned"].mean()}
+
+drift = pd.DataFrame(rows).T
+drift.round(3)
+`}
+/>
+
+Ranking quality (AUC) holds steady, but the churn rate is falling while the model keeps predicting the old level: by October it over-predicts by several points. The ranking is still fine for "contact the top 20%"; the *probabilities* (and the profit arithmetic above) are drifting and would need recalibration or retraining. Which metric matters depends on how the score is used, which is why you track both.
+
+## Performance by segment
+
+An average can hide a segment where the model fails or is miscalibrated. Check the segments the business cares about, with their sample sizes.
+
+<PyCell code={`
+def segment_report(df, by):
+    return df.groupby(by).apply(
+        lambda g: pd.Series({
+            "n": len(g),
+            "churn_rate": g["churned"].mean(),
+            "mean_pred": g["p"].mean(),
+            "auc": roc_auc_score(g["churned"], g["p"]),
+        })
+    ).round(3)
+
+segment_report(scored, "channel")
+`} />
+
+Predicted and actual rates agree within a couple of points in every channel and AUC is similar across them: no segment is being served badly. When this table shows a gap, that is a finding to report alongside the headline number, not after launch.
+
+<Lab title="Write the model card" time="15 min">
+
+Before a model is used, its facts go in a one-page document that a reviewer, an auditor or your successor can read. Fill this in for the churn model using the numbers you computed above:
+
+```text
+Model:            Churn risk, logistic regression pipeline, trained on snapshot 2024-04-01
+Intended use:     Rank active customers for the quarterly win-back campaign. Not for pricing or credit.
+Population:       Customers with a completed order in the last 180 days
+Target:           No completed order in the following 90 days
+Features:         18 behavioural and profile features as of the snapshot date (list + owner of each source)
+Evaluation:       Out-of-time, snapshot 2024-07-01: AUC __, top-decile precision __ (lift __x), Brier __
+Versus baseline:  "Recency > 60 days" rule reaches __% churners; model at same volume __%
+Decision rule:    Contact when p > 0.27 (offer $8, 25% save rate, $120 value) -> top __%
+Segments checked: Channel, device, country: no material gaps
+Known limits:     Probabilities drift as base churn rate changes (see stability table); retrain quarterly
+Monitoring:       Monthly: score distribution, mean prediction vs actual, AUC on matured labels
+Owner / date:     __
+```
+
+The blanks you can't fill are the gaps in your evaluation.
+
+</Lab>
