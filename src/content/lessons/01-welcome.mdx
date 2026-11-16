@@ -1,0 +1,67 @@
+---
+title: "Welcome to data science in 2026"
+description: "What the job looks like today, the toolkit you'll use, and your first lines of Python."
+module: "Foundations"
+order: 1
+minutes: 10
+status: ready
+---
+import PyCell from '../../components/PyCell.astro';
+
+Data science is still about one thing: **turning data into decisions people can trust**. What has changed is the tooling. Most of it is faster, more reproducible, and increasingly AI-assisted. This tutorial teaches the durable fundamentals alongside the tools practitioners actually reach for in 2026.
+
+## The 2026 toolkit at a glance
+
+| Job | What people use |
+| --- | --- |
+| Language | Python 3.13+ (with SQL everywhere) |
+| Environments & packages | `uv` (fast, lockfile-based) |
+| Notebooks | Jupyter, and reactive notebooks like marimo |
+| DataFrames | pandas, and Polars for speed and larger data |
+| In-process analytics SQL | DuckDB |
+| Classical ML | scikit-learn, gradient boosting (LightGBM, XGBoost) |
+| Deep learning & foundation models | PyTorch, pretrained models, LLM APIs |
+| Pairing | AI coding assistants, but *you* still own correctness |
+
+You don't need to install any of it to follow along. Every code cell below runs real Python **inside your browser** using [Pyodide](https://pyodide.org).
+
+## Your first cell
+
+Press **Run ▶** (or click into the code and press <kbd>Shift</kbd>+<kbd>Enter</kbd>). The first run downloads Python, so give it a few seconds.
+
+<PyCell code={`
+import sys
+print("Hello, data scientist!")
+print("Python", sys.version.split()[0])
+`} />
+
+Cells share variables, just like a notebook. Define something here…
+
+<PyCell code={`
+temperatures_c = [18.5, 21.0, 19.2, 25.8, 23.1]
+temperatures_c
+`} />
+
+…and use it in the next cell. The value of the last line is displayed automatically.
+
+<PyCell code={`
+temperatures_f = [round(c * 9 / 5 + 32, 1) for c in temperatures_c]
+print("Fahrenheit:", temperatures_f)
+print(f"Average: {sum(temperatures_c) / len(temperatures_c):.2f} °C")
+`} />
+
+## Exercise
+
+Some cells come with a **check** that verifies your answer. Make `hottest` hold the maximum of `temperatures_c` (hint: there's a built-in for that), then run the cell.
+
+<PyCell
+  code={`
+hottest = None  # replace None
+print(hottest)
+`}
+  check={`
+assert hottest == max(temperatures_c), "hottest should be the largest value in temperatures_c"
+`}
+/>
+
+> **How to use AI assistants while learning:** ask them to *explain* code and errors, not just to write answers. In the exercises, try first and then compare.

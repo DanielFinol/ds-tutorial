@@ -1,0 +1,89 @@
+---
+/**
+ * An editable, runnable Python cell.
+ *   <PyCell code={`print("hi")`} />
+ *   <PyCell code={`x = ...`} check={`assert x == 42, "x should be 42"`} title="Exercise" />
+ */
+interface Props {
+  code: string;
+  check?: string;
+  title?: string;
+}
+const { code, check, title } = Astro.props;
+const source = code.replace(/^\n+|\s+$/g, '');
+const rows = Math.min(Math.max(source.split('\n').length, 2), 24);
+---
+
+<py-cell class="cell" data-check={check} data-initial={source}>
+  <div class="cell-head">
+    <span class="cell-title">{title ?? (check ? 'Exercise' : 'Python')}</span>
+    <div class="cell-actions">
+      <button type="button" class="btn-ghost" data-reset>Reset</button>
+      <button type="button" class="btn" data-run>Run ▶</button>
+    </div>
+  </div>
+  <textarea wrap="off" spellcheck="false" autocapitalize="off" autocomplete="off" rows={rows} aria-label="Python code">{source}</textarea>
+  <div class="cell-out" aria-live="polite" hidden></div>
+</py-cell>
+
+<script>
+  import { runPython } from '../lib/py-client';
+
+  class PyCellElement extends HTMLElement {
+    connectedCallback() {
+      const ta = this.querySelector('textarea')!;
+      const out = this.querySelector<HTMLElement>('.cell-out')!;
+      const runBtn = this.querySelector<HTMLButtonElement>('[data-run]')!;
+      const check = this.dataset.check;
+
+      const run = async () => {
+        runBtn.disabled = true;
+        out.hidden = false;
+        out.className = 'cell-out';
+        out.replaceChildren(Object.assign(document.createElement('p'), { className: 'status', textContent: 'Starting…' }));
+        const r = await runPython(ta.value, {
+          check,
+          onStatus: (s) => (out.querySelector('.status')!.textContent = s),
+        });
+        out.replaceChildren();
+        const pre = (text: string, cls: string) =>
+          out.appendChild(Object.assign(document.createElement('pre'), { className: cls, textContent: text.trimEnd() }));
+        if (r.stdout) pre(r.stdout, 'stdout');
+        if (r.result?.html) {
+          const div = document.createElement('div');
+          div.className = 'html-result';
+          div.innerHTML = r.result.html; // output of the learner's own code (e.g. a pandas table)
+          out.appendChild(div);
+        } else if (r.result?.text) pre(r.result.text, 'result');
+        for (const b64 of r.images) {
+          const img = document.createElement('img');
+          img.src = `data:image/png;base64,${b64}`;
+          img.alt = 'Plot produced by the code above';
+          out.appendChild(img);
+        }
+        if (r.stderr) pre(r.stderr, 'stderr');
+        if (r.error) pre(r.error, 'error');
+        if (r.checkPassed === true) out.classList.add('passed');
+        if (r.checkPassed === true) pre('✓ Nice — that passes the check.', 'success');
+        if (!out.childElementCount) pre('(no output)', 'muted');
+        runBtn.disabled = false;
+      };
+
+      runBtn.addEventListener('click', run);
+      ta.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.shiftKey || e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          run();
+        } else if (e.key === 'Tab' && !e.shiftKey) {
+          e.preventDefault();
+          ta.setRangeText('    ', ta.selectionStart, ta.selectionEnd, 'end');
+        }
+      });
+      this.querySelector('[data-reset]')!.addEventListener('click', () => {
+        ta.value = this.dataset.initial ?? '';
+        out.hidden = true;
+      });
+    }
+  }
+  if (!customElements.get('py-cell')) customElements.define('py-cell', PyCellElement);
+</script>
