@@ -1,0 +1,110 @@
+=== f5a50f3d
+Variables, fugas de información y pipelines
+=== 0ca6e7c5
+Construye una tabla de entrenamiento con corte temporal a partir de eventos en bruto, observa cómo es una fuga de información y empaqueta preprocesamiento y modelo en un único pipeline de scikit-learn.
+=== 2fb5ddc1
+Modelos predictivos
+=== 1aaf1b4c
+En los cursos, la tabla de variables te la dan hecha. En el trabajo, construirla es la mayor parte del proyecto, y es donde los modelos se estropean sin hacer ruido. Las tres lecciones siguientes siguen un proyecto realista:
+=== 6bfb9ad9
+> **Equipo de retención:** Queremos enviar una oferta de recuperación a los clientes que están a punto de dejar de comprar. ¿Puedes puntuar a todos según su riesgo de abandono?
+=== dd71eb0f
+Definición de trabajo, acordada con el equipo: un cliente **abandona** (churn) si no hace ningún pedido completado en los próximos 90 días. Puntuamos a los clientes que compraron al menos una vez en los últimos 180 días.
+=== b2442256
+el "hoy" de este ejemplo de entrenamiento
+=== 671839ba
+## Variables con corte temporal
+=== 14e330dc
+Una fila de entrenamiento tiene que ser exactamente igual que una fila en el momento de predecir. Elige una **fecha de corte**: las variables solo pueden usar datos *anteriores* a ella; la etiqueta es lo que ocurrió en los 90 días *posteriores*.
+=== eadb88f9
+todo lo que habríamos sabido en la fecha de corte
+=== c422645b
+población: compraron en los últimos 180 días
+=== 44d76ac2
+**1.** Añade a `feats` dos variables de ventana: `orders_90d` y `spend_90d`, el número y el valor total de los pedidos completados de cada cliente en los **90 días anteriores al corte**. Los clientes sin ninguno deben tener 0, no un valor ausente.
+=== c9c5b916
+`last_90.groupby('customer_id').size().reindex(feats.index, fill_value=0)` y el mismo patrón con `['total'].sum()`.
+=== 2eb3ee43
+sustituye los ... por tu código
+=== b5b691f3
+los clientes sin pedidos en la ventana deben tener 0, no NaN: añade .reindex(feats.index, fill_value=0)
+=== 59e961dc
+orders_90d: número de pedidos de last_90 por cliente
+=== da099b40
+spend_90d: suma de total en last_90 por cliente
+=== 5c9d97f4
+**2.** Ahora la etiqueta. Añade a `feats` una columna booleana `churned`: `True` cuando el cliente **no** tiene ningún pedido completado desde el corte hasta 90 días después (sin incluir ese día).
+=== ec0c1cae
+`~feats.index.isin(future['customer_id'])`
+=== fefb20cc
+churned debe ser una columna booleana
+=== 74f18607
+churned = el customer_id NO aparece en future
+=== 3a981c72
+Ese patrón (corte, ventanas antes, etiqueta después) es toda la receta. `dsw.churn_snapshot(cutoff)` lo aplica con una docena de variables más, incluidos tickets de soporte y reembolsos. Entrenaremos con la foto del **1 de abril** y evaluaremos con la del **1 de julio**: una evaluación *fuera de tiempo* (out-of-time), que es como se usará el modelo de verdad.
+=== d45178cb
+## Cómo es una fuga de información
+=== 3530b603
+Una variable tiene **fuga** (leakage) cuando contiene información que no existirá en el momento de predecir. Imagina que un compañero servicial añade «días desde el último pedido del cliente», calculado con la tabla de pedidos actual en lugar de a fecha de corte:
+=== 88880914
+La variable con fuga «sabe» si el cliente hizo un pedido después del corte, que es la propia etiqueta. El modelo parece brillante en las pruebas y es inútil en producción, donde esa columna vuelve a ser simplemente la recencia.
+=== 550f046d
+La prueba para cada variable: **«el día que haga esta predicción, ¿podría calcular este valor?»** Un salto repentino de precisión debido a una sola variable es motivo de sospecha, no de celebración.
+=== cef79370
+## Un solo pipeline: preprocesamiento + modelo
+=== f38127a1
+Las tablas reales tienen valores ausentes, categorías y escalas mezcladas. Si imputas y escalas con estadísticos calculados sobre *todas* las filas antes de separar, el conjunto de prueba se ha filtrado al entrenamiento. Un **Pipeline** de scikit-learn aprende cada paso de preprocesamiento solo con los datos de entrenamiento y aplica exactamente los mismos pasos al predecir.
+=== 3231ee25
+**3.** Termina el pipeline. `preprocess` debe ser un `ColumnTransformer` que pase las columnas `numeric` por los pasos numéricos y codifique en one-hot las columnas `categorical` (ignorando las categorías que nunca se vieron en el entrenamiento). `model` encadena `preprocess` con una `LogisticRegression(max_iter=1000)`. Ajústalo con la foto de entrenamiento y guarda el AUC fuera de tiempo en `auc`.
+=== dc3f62a8
+`('cat', OneHotEncoder(handle_unknown='ignore'), categorical)` y `Pipeline([('preprocess', preprocess), ('clf', LogisticRegression(max_iter=1000))])`.
+=== 6e26ab0e
+("cat", ..., categorical),
+=== 1410b584
+model debe ser un Pipeline: Pipeline([('preprocess', preprocess), ('clf', LogisticRegression(max_iter=1000))])
+=== 8107101f
+el pipeline debe contener el ColumnTransformer
+=== 06af451f
+no se están usando las columnas categóricas: añade ('cat', OneHotEncoder(handle_unknown='ignore'), categorical)
+=== 1c4e6b6e
+el modelo falla con una categoría que nunca había visto: usa OneHotEncoder(handle_unknown='ignore')
+=== 552eba22
+auc debe ser el AUC del pipeline en la foto de prueba
+=== 9cff7e10
+Como el pipeline es un único estimador, la validación cruzada vuelve a ajustar el imputador, el escalador y el codificador dentro de cada partición, de modo que la partición de validación nunca influye en el preprocesamiento:
+=== 66cd2980
+## Codifica lo que sabes del negocio
+=== 2dd8d014
+La recencia significa cosas distintas para clientes distintos: 30 días de silencio son alarmantes en alguien que compra cada semana y normales en alguien que compra cada trimestre. Codifica ese conocimiento.
+=== 055f4265
+**4.** Escribe `add_features(df)`: devuelve una **copia** de `df` con dos columnas nuevas. `avg_gap_days` son los días que suele dejar el cliente entre pedidos: `(tenure_days - recency_days)`, con un mínimo de 1, dividido entre `orders_total`. `recency_ratio` es `recency_days / avg_gap_days`.
+=== 24c044ac
+`df['avg_gap_days'] = (df['tenure_days'] - df['recency_days']).clip(lower=1) / df['orders_total']`
+=== 49a58438
+df["avg_gap_days"] = ...
+=== c3315e07
+df["recency_ratio"] = ...
+=== ea2ac043
+añade las dos columnas nuevas
+=== 6a20015e
+devuelve una copia; no modifiques la tabla de entrada
+=== a7b4422f
+avg_gap_days = (tenure_days - recency_days).clip(lower=1) / orders_total
+=== 68066b21
+recency_ratio = recency_days / avg_gap_days
+=== 6b2efc43
+Pon la función *dentro* del pipeline con `FunctionTransformer`, para que entrenamiento, evaluación y producción apliquen el mismo código:
+=== e84aecbc
+Mide, no supongas: aquí la tabla completa ayuda, y el ratio no añade casi nada sobre ella (el modelo ya podía combinar la recencia y el número de pedidos). Fíjate en lo lejos que llegan tres variables sensatas: ese modelo sencillo es la **referencia** (baseline) frente a la que cada modelo posterior tiene que justificarse.
+=== a07bc164
+## Mira por dentro
+=== 6873eed4
+Un modelo lineal sobre variables escaladas se puede leer directamente: los coeficientes más grandes son las señales más fuertes. Comprueba que tienen sentido; una variable principal sin sentido suele ser un error o una fuga.
+=== 75ca626e
+Guarda y vuelve a cargar el modelo
+=== 2b76115b
+Un pipeline ajustado es un solo objeto: guárdalo, y quien lo cargue tendrá el preprocesamiento y el modelo juntos.
+=== 2b54e748
+En un proceso de Python **nuevo**, cárgalo y puntúa filas nuevas:
+=== 174c4800
+Falla con `AttributeError: Can't get attribute 'add_features'`. Los pickles guardan *referencias* a tus funciones, no su código. Arréglalo como lo hacen los equipos: mueve `add_features` a un módulo (`features.py`), impórtala desde ahí tanto en el script de entrenamiento como en el de puntuación, y vuelve a intentarlo. Fíjate también en la versión de scikit-learn registrada: cargar un pickle con una versión distinta no está soportado, y por eso importa el lockfile de la lección 1.

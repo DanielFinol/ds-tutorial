@@ -1,4 +1,6 @@
 ---
+import { langOfPath, ui } from '../lib/i18n';
+
 /**
  * An editable, runnable code cell.
  *   <PyCell code={`print("hi")`} />
@@ -14,10 +16,11 @@ interface Props {
   lang?: 'python' | 'sql';
 }
 const { code, check, solution, hint, title, lang = 'python' } = Astro.props;
+const t = ui[langOfPath(Astro.url.pathname)];
 const trim = (s?: string) => s?.replace(/^\n+|\s+$/g, '');
 const source = trim(code)!;
 const isExercise = Boolean(check);
-const label = title ?? (isExercise ? 'Exercise' : lang === 'sql' ? 'SQL' : 'Python');
+const label = title ?? (isExercise ? t.exercise : lang === 'sql' ? 'SQL' : 'Python');
 // `inline code` in hints
 const hintParts = hint?.split(/(`[^`]+`)/g) ?? [];
 ---
@@ -30,10 +33,10 @@ const hintParts = hint?.split(/(`[^`]+`)/g) ?? [];
   data-initial={source}
 >
   <div class="cell-head">
-    <span class="cell-title">{label}<span class="cell-done" aria-label="solved"> ✓</span></span>
+    <span class="cell-title">{label}<span class="cell-done" aria-label={t.solved}> ✓</span></span>
     <div class="cell-actions">
-      <button type="button" class="btn-ghost" data-reset>Reset</button>
-      <button type="button" class="btn" data-run>Run ▶</button>
+      <button type="button" class="btn-ghost" data-reset>{t.reset}</button>
+      <button type="button" class="btn" data-run>{t.run}</button>
     </div>
   </div>
   <div class="cell-editor"><pre class="cell-fallback">{source}</pre></div>
@@ -42,15 +45,15 @@ const hintParts = hint?.split(/(`[^`]+`)/g) ?? [];
       <div class="cell-help">
         {hint && (
           <details>
-            <summary>Hint</summary>
+            <summary>{t.hint}</summary>
             <p>{hintParts.map((p) => (p.startsWith('`') ? <code>{p.slice(1, -1)}</code> : p))}</p>
           </details>
         )}
         {solution && (
           <details>
-            <summary>Solution</summary>
+            <summary>{t.solution}</summary>
             <pre class="cell-solution">{trim(solution)}</pre>
-            <button type="button" class="btn-ghost" data-use-solution>Copy into editor</button>
+            <button type="button" class="btn-ghost" data-use-solution>{t.copySolution}</button>
           </details>
         )}
       </div>

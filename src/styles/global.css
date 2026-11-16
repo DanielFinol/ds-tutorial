@@ -177,3 +177,12 @@ kbd { font-family: var(--mono); font-size: 0.82em; border: 1px solid var(--borde
 /* Code must show the characters you type: no programming ligatures */
 code, pre, .cm-content { font-variant-ligatures: none; font-feature-settings: 'liga' 0, 'calt' 0; }
 .cell-out .muted { white-space: pre-wrap; }
+
+.site-header nav { display: flex; gap: 16px; align-items: center; }
+.site-header nav .lang-switch { border: 1px solid var(--border); border-radius: 999px; padding: 1px 10px; font-size: 13px; }
+
+@media (max-width: 520px) {
+  .brand { font-size: 15px; line-height: 1.25; }
+  .site-header nav { gap: 10px; }
+  .site-header nav a { font-size: 14px; }
+}

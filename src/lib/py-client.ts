@@ -24,10 +24,13 @@ function getWorker(): Worker {
 }
 
 /** Run Python in the shared page worker. Cells run sequentially in the worker. */
-export function runPython(code: string, opts: { check?: string; onStatus?: (s: string) => void } = {}): Promise<Done> {
+export function runPython(
+  code: string,
+  opts: { check?: string; lang?: 'en' | 'es'; onStatus?: (s: string) => void } = {},
+): Promise<Done> {
   const id = nextId++;
   return new Promise((resolve) => {
     pending.set(id, { resolve, onStatus: opts.onStatus });
-    getWorker().postMessage({ id, code, check: opts.check });
+    getWorker().postMessage({ id, code, check: opts.check, lang: opts.lang ?? 'en' });
   });
 }

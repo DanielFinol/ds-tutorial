@@ -1,23 +1,23 @@
 ---
 import '../styles/global.css';
-import { url } from '../lib/paths';
+import { LANGS, ui, type Lang } from '../lib/i18n';
+import { switchLang, url } from '../lib/paths';
 
 interface Props {
   title: string;
+  lang?: Lang;
   description?: string;
   lesson?: string;
 }
-const SITE = 'Data Science at Work';
-const {
-  title,
-  description = 'Hands-on practice in the day-to-day skills of a working data scientist. Real Python and SQL, in your browser.',
-  lesson,
-} = Astro.props;
-const fullTitle = title === SITE ? title : `${title} · ${SITE}`;
+const { title, lang = 'en', lesson } = Astro.props;
+const t = ui[lang];
+const description = Astro.props.description ?? t.description;
+const fullTitle = title === t.site ? title : `${title} · ${t.site}`;
+const others = LANGS.filter((l) => l !== lang);
 ---
 
 <!doctype html>
-<html lang="en">
+<html lang={lang}>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -27,22 +27,24 @@ const fullTitle = title === SITE ? title : `${title} · ${SITE}`;
     <link rel="icon" href={url('favicon.svg')} type="image/svg+xml" />
     <link rel="apple-touch-icon" href={url('icons/icon-192.png')} />
     <link rel="manifest" href={url('manifest.webmanifest')} />
+    {LANGS.map((l) => <link rel="alternate" hreflang={l} href={new URL(switchLang(Astro.url.pathname, l), Astro.site)} />)}
     <script src="../lib/pwa.ts"></script>
   </head>
   <body data-lesson={lesson}>
     <header class="site-header">
       <div class="wrap">
-        <a class="brand" href={url()}>Data Science <span>at Work</span></a>
-        <nav><a href={url()}>Lessons</a></nav>
+        <a class="brand" href={url('', lang)}>{t.brand[0]} <span>{t.brand[1]}</span></a>
+        <nav>
+          <a href={url('', lang)}>{t.lessons}</a>
+          {others.map((l) => <a class="lang-switch" href={switchLang(Astro.url.pathname, l)} hreflang={l} lang={l}>{ui[l].langName}</a>)}
+        </nav>
       </div>
     </header>
     <main class="wrap">
       <slot />
     </main>
     <footer class="site-footer">
-      <div class="wrap">
-        All code runs locally in your browser (Python via Pyodide, SQL via DuckDB): no server, no sign-up. Your work is saved in this browser. Works offline after your first visit.
-      </div>
+      <div class="wrap">{t.footer}</div>
     </footer>
   </body>
 </html>

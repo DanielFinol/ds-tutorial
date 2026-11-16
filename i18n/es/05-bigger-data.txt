@@ -1,0 +1,101 @@
+=== 85a015f5
+Datos más grandes: Parquet, DuckDB y Polars
+=== 1902a670
+Qué hacer cuando pandas es demasiado lento o los datos no caben en memoria: archivos columnares, SQL sobre archivos y la API de expresiones de Polars.
+=== 541a2fe9
+Trabajar con datos
+=== 8ee5041d
+pandas carga la tabla entera en memoria y trabaja con un solo núcleo de CPU. Eso va bien hasta unos pocos millones de filas. A partir de ahí, estas son las respuestas habituales hoy, en el orden en que deberías recurrir a ellas:
+=== 4a28a83b
+1. **Haz el trabajo pesado donde viven los datos**: agrega en el warehouse con SQL y trae solo el resultado.
+2. **Guarda los datos en Parquet** y lee solo las columnas y filas que necesitas.
+3. **Consulta archivos con DuckDB**, que procesa en streaming datos más grandes que la memoria.
+4. **Usa Polars** cuando quieras código de DataFrames multihilo y con optimización perezosa.
+=== 71b8f82e
+Las tablas de Bramble son pequeñas, así que aquí todo se ejecuta al instante, pero el código es exactamente el que escribirías para un conjunto de datos de 100 GB.
+=== ef3247d6
+## Parquet: lee menos
+=== f72e8b35
+CSV es texto: cada lectura analiza cada carácter de cada columna y los tipos se adivinan. **Parquet** es columnar, tipado y comprimido, de modo que un lector puede saltarse columnas enteras y los grupos de filas que sus estadísticas de mínimo y máximo descartan.
+=== f78c33ed
+**1.** Carga en `dec` solo las columnas `order_id`, `customer_id` y `total` de los **pedidos completados desde el 1 de diciembre de 2024**, sin leer el resto del archivo. `pd.read_parquet` acepta `columns=` y `filters=` (una lista de tuplas `(columna, operador, valor)` que se aplican dentro del propio lector del archivo).
+=== 00cf6d4c
+`columns=['order_id', 'customer_id', 'total']` y `filters=[('status', '==', 'completed'), ('order_ts', '>=', pd.Timestamp('2024-12-01'))]`.
+=== 0728cec5
+columns=..., filters=...
+=== a2aeec15
+las columnas deben ser exactamente order_id, customer_id, total; y son {list(dec.columns)}
+=== 61da8818
+se esperaban {len(_e)} filas y hay {len(dec)}: filtra por status y order_ts
+=== 1ec17d7b
+## DuckDB: SQL directamente sobre archivos
+=== 2146f073
+DuckDB trata la ruta de un archivo como una tabla. No carga nada por adelantado: lee solo las columnas que toca la consulta, en paralelo, y vuelca a disco si un resultado intermedio no cabe en memoria. Los patrones con comodín (`'data/events/*.parquet'`) leen una carpeta entera como una sola tabla.
+=== c29efe77
+`EXPLAIN` muestra lo que el motor va a hacer realmente. Busca la **proyección** (solo se leen las columnas necesarias) y el **filtro** aplicado dentro de la lectura del Parquet:
+=== 8d0f8233
+**2.** Sin cargar antes ningún archivo en pandas, encuentra los **10 clientes con más ingresos completados en 2024**, con su `channel`. Columnas: `customer_id`, `channel`, `orders`, `revenue` (redondeado a 2 decimales), ordenado por ingresos de mayor a menor.
+=== dd542f60
+Filtra por `o.status = 'completed'` y por el rango de fechas de 2024, `GROUP BY o.customer_id, c.channel`, `ORDER BY revenue DESC LIMIT 10`.
+=== 9a1061d3
+Un paso habitual de un pipeline es convertir una sola vez un montón de CSV a Parquet y consultar eso después. `COPY` lo hace sin que los datos pasen en ningún momento por Python:
+=== 5bcbbd63
+## Polars: DataFrames con optimizador de consultas
+=== 0e94ade8
+Polars es la librería de DataFrames que adoptan los equipos cuando pandas se convierte en el cuello de botella. En la práctica importan tres diferencias:
+=== c06bd17b
+- **Expresiones.** Describes columnas con `pl.col("total").sum()` en vez de indexar; la misma expresión sirve en `select`, `with_columns`, `filter` y `group_by().agg()`.
+- **Sin índice.** Las filas son solo filas; `group_by` devuelve columnas normales.
+- **Ejecución perezosa.** `.lazy()` (o `pl.scan_parquet` en disco) construye un plan de consulta; no se ejecuta nada hasta `.collect()`, y antes el optimizador descarta columnas y adelanta los filtros.
+=== 78d923a8
+En el navegador leemos a través de pyarrow; en tu equipo usa pl.scan_parquet("data/orders.parquet").
+=== 4259abad
+el plan optimizado: fíjate en el filtro y en las tres columnas que necesita
+=== aaee52ac
+El diccionario de pandas a Polars para las operaciones que ya conoces:
+=== 3bd6ec5e
+| pandas | Polars |
+| --- | --- |
+| `df[df.total > 100]` | `df.filter(pl.col("total") > 100)` |
+| `df.assign(x=df.a * 2)` | `df.with_columns((pl.col("a") * 2).alias("x"))` |
+| `df.groupby("k").agg(n=("id", "count"))` | `df.group_by("k").agg(pl.len().alias("n"))` |
+| `df.groupby("k")["v"].transform("sum")` | `pl.col("v").sum().over("k")` |
+| `df.merge(other, on="k", how="left")` | `df.join(other, on="k", how="left")` |
+| `df.sort_values("v", ascending=False)` | `df.sort("v", descending=True)` |
+| `np.where(cond, a, b)` | `pl.when(cond).then(a).otherwise(b)` |
+=== eb14ac24
+**3.** Escribe esta en Polars y guarda el resultado ya recolectado en `by_device`: para los pedidos **completados**, por `device`, el número de pedidos (`orders`), los ingresos totales (`revenue`) y la proporción de pedidos con descuento (`discount_share`), ordenado por `revenue` de mayor a menor.
+=== db5988a0
+`.filter(pl.col('status') == 'completed').group_by('device').agg(pl.len().alias('orders'), pl.col('total').sum().alias('revenue'), (pl.col('discount_pct') > 0).mean().alias('discount_share')).sort('revenue', descending=True)`
+=== f55e5996
+.filter(...).group_by(...).agg(...).sort(...)
+=== 27dd13be
+by_device debe ser un DataFrame de Polars ya recolectado (con .collect())
+=== 94f172c5
+**4.** Las expresiones de ventana usan `.over(...)`. Construye `first_orders`: una fila por cliente con su **primer pedido completado**, con las columnas `customer_id`, `order_ts`, `total` y `channel` (unido desde `customers_pl`), ordenado por `customer_id`.
+=== e911f04c
+`.filter(pl.col('order_ts') == pl.col('order_ts').min().over('customer_id'))`, después `.join(customers_pl.lazy().select('customer_id', 'channel'), on='customer_id')`, `.select(...)`, `.sort('customer_id')`.
+=== a5c48d49
+conserva el primer pedido de cada cliente, une el canal, selecciona y ordena
+=== cecdf203
+first_orders debe ser un DataFrame de Polars ya recolectado (con .collect())
+=== a5317aa6
+se esperaba una fila por cliente con un pedido completado ({len(_e)}) y hay {first_orders.height}
+=== 55570987
+## Qué herramienta y cuándo
+=== 8065dfdd
+| Situación | Recurre a |
+| --- | --- |
+| Los datos están en un warehouse | SQL allí; trae el agregado, no las filas |
+| Archivos de hasta unos pocos GB, trabajo exploratorio, gráficos, scikit-learn | pandas (leyendo Parquet, con columnas seleccionadas) |
+| Archivos más grandes que la memoria, o piensas en SQL | DuckDB sobre Parquet |
+| Pipelines lentos en pandas, agrupaciones y joins pesados, procesos batch en producción | Polars (perezoso) |
+| De cientos de GB a TB, muchas máquinas | Spark o el warehouse; no es un problema para un portátil |
+=== 666d717b
+Interoperan a través de Arrow, así que mezclarlas es lo normal: DuckDB para el join grande y pandas para el último tramo hacia un modelo o un gráfico.
+=== b0f1c4b3
+Nota la diferencia con 50 millones de filas
+=== 1a2c4afe
+Genera un archivo que resulte incómodo para pandas y pon a competir los tres motores.
+=== 6764b137
+Observa la memoria en el monitor del sistema mientras se ejecuta cada uno. Después haz competitivo a pandas con `columns=` y `filters=` del ejercicio 1, y fíjate en qué parte de la diferencia se debía simplemente a *leer menos*.

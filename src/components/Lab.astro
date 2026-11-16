@@ -1,13 +1,16 @@
 ---
+import { langOfPath, ui } from '../lib/i18n';
+
 /** A hands-on block to do on your own machine (tools that can't run in a browser). */
 interface Props {
   title: string;
   time?: string;
 }
 const { title, time } = Astro.props;
+const t = ui[langOfPath(Astro.url.pathname)];
 ---
 
 <aside class="lab">
-  <p class="lab-head"><span class="lab-tag">On your machine</span> {title}{time && <span class="lab-time"> · {time}</span>}</p>
+  <p class="lab-head"><span class="lab-tag">{t.onYourMachine}</span> {title}{time && <span class="lab-time"> · {time}</span>}</p>
   <slot />
 </aside>

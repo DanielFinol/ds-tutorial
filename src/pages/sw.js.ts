@@ -1,12 +1,17 @@
 import type { APIRoute } from 'astro';
-import { getLessons } from '../lib/lessons';
+import { LANGS } from '../lib/i18n';
+import { getLessons, slugOf } from '../lib/lessons';
 
 // The service worker is generated at build time so that every deploy ships a
 // new worker (new BUILD id), which re-caches all lesson pages.
 const BUILD = Date.now().toString(36);
 
 export const GET: APIRoute = async () => {
-  const pages = (await getLessons()).filter((l) => l.data.status === 'ready').map((l) => `lessons/${l.id}/`);
+  const pages = ['es/'];
+  for (const lang of LANGS) {
+    const prefix = lang === 'en' ? '' : `${lang}/`;
+    for (const l of await getLessons(lang)) pages.push(`${prefix}lessons/${slugOf(l)}/`);
+  }
   const js = `// Service worker: makes the tutorial installable and usable offline.
 const BUILD = ${JSON.stringify(BUILD)};
 const PAGES = 'pages-' + BUILD;

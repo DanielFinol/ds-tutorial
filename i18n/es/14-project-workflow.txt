@@ -1,0 +1,110 @@
+=== 0cf00674
+Del notebook al proyecto
+=== ac81b38d
+Convierte el código exploratorio en funciones, módulos y tests; y después, el flujo de trabajo en equipo que los rodea: ramas de git, pull requests, linting y CI.
+=== 51289e1c
+Poner tu trabajo en producción
+=== eeeeee1e
+El análisis empieza en los notebooks. Son un mal sitio para que viva: estado oculto, sin tests e imposibles de revisar. El mayor salto en la práctica profesional es esta rutina: **explora en un notebook y después lleva todo lo que vayas a reutilizar a funciones dentro de un módulo, con tests y bajo control de versiones.**
+=== 1bfe6c3d
+Esta lección hace la mitad de Python en el navegador (aquí se ejecuta `pytest` de verdad) y la mitad de git en tu equipo.
+=== 53ccb2f4
+## Una celda de notebook que fue creciendo
+=== 58acf1e8
+Esto es típico de lo que se va acumulando: variables globales, fechas escritas a mano en el código, el mismo filtro pegado dos veces y un resultado que depende de qué celdas se ejecutaron antes.
+=== de9ab759
+error: descarta casi todo el 31 de diciembre
+=== f90b355a
+## 1. Extrae una función
+=== d036d497
+Una buena función de análisis recibe todo lo que necesita como **argumentos**, devuelve un valor, no toca variables globales, no modifica sus entradas y valida lo que razonablemente podría salir mal.
+=== 6a6e3325
+**1.** Escribe `monthly_revenue(orders, start, end)`. Devuelve un DataFrame con una fila por mes y las columnas `month` (un `Period` mensual), `orders` y `revenue`, para los pedidos **completados** con `start <= order_ts < end` (intervalo semiabierto). Debe lanzar `ValueError` si `start` no es anterior a `end`, y no debe modificar `orders`.
+=== 94defdce
+Convierte con `pd.Timestamp(start)`; `if start >= end: raise ValueError(...)`; filtra con una sola máscara booleana (eso produce una tabla nueva, así que `.assign(month=...)` es seguro); después `groupby('month').agg(orders=('order_id', 'count'), revenue=('total', 'sum')).reset_index()`.
+=== 3638bc97
+devuelve un DataFrame
+=== 096ec7df
+la función ha añadido una columna a su entrada: trabaja sobre una copia filtrada
+=== a5433873
+si start es posterior a end, debe lanzar ValueError
+=== c93dc60d
+un período sin pedidos debe devolver una tabla vacía, no fallar
+=== eb5948a2
+## 2. Llévala a un módulo
+=== 370b9847
+Las funciones que vas a reutilizar van en un archivo `.py` dentro de un paquete, desde donde pueden importarlas por igual notebooks, scripts y tests. Un proyecto pequeño típico tiene este aspecto:
+=== dc8272e0
+La celda de abajo crea el paquete en el sistema de archivos de esta sesión del navegador e importa desde él, exactamente como harías en local.
+=== 413b1b76
+## 3. Pruébala
+=== af1f613c
+Un test construye **a mano una entrada diminuta**, llama a la función y comprueba la salida exacta esperada. Que los datos estén hechos a mano es la clave: puedes ver cuál es la respuesta correcta, y cada caso límite se puede colocar a propósito. Aquí tienes un test del que partir, ejecutado con pytest de verdad:
+=== 0aa8ce04
+Un solo test que pasa demuestra poco. Los buenos tests son los que **fallan cuando el código está mal**. La comprobación del siguiente ejercicio hace exactamente eso: ejecuta tus tests contra el módulo correcto (deben pasar) y contra varias versiones saboteadas (deben fallar).
+=== 990da3d7
+**2.** Amplía `TEST_CODE` con tests que detecten estos dos errores: (a) una versión que se olvida de excluir los pedidos cancelados y reembolsados, y (b) una versión que incluye los pedidos hechos exactamente en `end` (`<=` en lugar de `<`). Prueba también que un rango de fechas invertido lanza `ValueError` (usa `pytest.raises`).
+=== 05b972f1
+Tres tests pequeños: uno con un pedido cancelado y otro reembolsado cuyos totales no deben aparecer en el resultado; uno con un pedido exactamente en '2024-02-01' cuando end es '2024-02-01', que debe quedar excluido; y uno con `with pytest.raises(ValueError): monthly_revenue(orders, '2024-03-01', '2024-01-01')`.
+=== 7614ea1b
+añade tus tests debajo
+=== aa169acb
+bramble/metrics.py ha cambiado: vuelve a ejecutar la celda que lo escribe
+=== b4c91de9
+tus tests deberían pasar contra el módulo correcto (mira la salida de pytest de arriba)
+=== 33822065
+ningún test falla cuando se cuentan los pedidos cancelados o reembolsados: añade un test con un pedido no completado y comprueba que queda excluido
+=== c93c181a
+ningún test falla cuando se incluye un pedido hecho exactamente en la fecha final: añade un pedido en la fecha end y comprueba que queda excluido
+=== 589a3c3b
+ningún test falla cuando se elimina la validación del rango de fechas: añade un test con pytest.raises(ValueError)
+=== 51d99c6c
+exactamente en start: incluido
+=== bac9ab62
+exactamente en end: excluido
+=== b05c84f6
+Qué probar en el código de datos, por orden de valor: los límites de cada filtro (fechas, estados), la entrada vacía, los duplicados y los valores ausentes en las claves, y un caso pequeño de principio a fin con la respuesta calculada a mano. No hace falta que pruebes el propio pandas.
+=== 02921ca5
+## 4. Corrige un error como un profesional
+=== ce3718cd
+Un compañero avisa de que la lista de «mejores clientes» del equipo de fidelización contiene personas que lo devolvieron todo. La rutina: **escribe un test que falle y reproduzca el error, y después corrige el código hasta que pase.** Los tests que fallan ya están escritos abajo.
+=== 6d002b64
+**3.** Corrige `top_customers` para que pasen los dos tests: debe contar solo los pedidos **completados** y devolver los clientes ordenados por ingresos de mayor a menor, deshaciendo los empates con el `customer_id` más bajo primero.
+=== d7fb7810
+Filtra primero: `orders[orders['status'] == 'completed']`. Ordena con dos claves: `.sort_values(['revenue', 'customer_id'], ascending=[False, True])`.
+=== 69d393c8
+conserva el nombre de la función top_customers
+=== 8bd0c7bb
+los tests siguen fallando: lee la salida de pytest de arriba. Filtra primero los pedidos completados y después ordena por revenue descendente y customer_id ascendente.
+=== 23627deb
+El test se queda en el repositorio para siempre, así que este error nunca podrá volver sin que nadie lo note.
+=== e6454102
+El flujo de git que usarás todos los días
+=== d521bd25
+Todos los equipos trabajan igual: **una rama por cambio, commits pequeños, un pull request, revisión y merge.** En tu proyecto `bramble-analysis`:
+=== 0f9b9c2e
+Detalles que te delatan como alguien que ya ha hecho esto antes: commits que hacen una sola cosa cada uno, con un mensaje que dice *qué y por qué*; no subir nunca datos, credenciales ni `.venv`; `git pull --rebase` antes de hacer push; y notebooks subidos con las salidas borradas (`uv run jupyter nbconvert --clear-output --inplace notebooks/*.ipynb`, o la herramienta `nbstripout`).
+=== 6491be5a
+Para que `from bramble.metrics import ...` funcione desde `src/`, añade esto a `pyproject.toml` y ejecuta `uv sync`:
+=== 4a88c4d9
+Automatiza las comprobaciones: ruff, pre-commit y CI
+=== b76f1c55
+**ruff** es el linter y formateador estándar; sustituye a flake8, isort y black, y se ejecuta en milisegundos:
+=== 88a25f7f
+Ejecútalos automáticamente antes de cada commit con **pre-commit** (`uv add --dev pre-commit` y después `uv run pre-commit install`), configurado en `.pre-commit-config.yaml`:
+=== e98d1ff7
+Y ejecuta los tests en cada pull request con **integración continua**. En GitHub, guarda esto como `.github/workflows/ci.yml`:
+=== d623dfc6
+Sube una rama con un test que falle a propósito y observa cómo el pull request se pone en rojo. Esa cruz roja, visible para quien revisa, es lo que hace que merezca la pena escribir tests.
+=== f71facf0
+## Revisar un pull request
+=== 3434087d
+La mitad del flujo de trabajo consiste en leer los cambios de otras personas. Quien revisa código de datos comprueba, en este orden:
+=== bea17e03
+1. **¿Es correcto?** Claves de los joins y granularidad, límites de fechas, filtros, qué ocurre con los valores ausentes y con las entradas vacías.
+2. **¿Está probado?** Un test que fallaría si la lógica estuviera mal, no uno que simplemente se ejecuta.
+3. **¿Es reproducible?** Sin rutas locales escritas a mano, sin estado oculto, con las dependencias fijadas y las semillas aleatorias establecidas.
+4. **¿Es legible?** Nombres que dicen qué es cada cosa; un lector puede seguirlo sin que el autor esté presente.
+5. **¿Se filtra algo?** Ni credenciales ni datos de clientes en el repositorio o en las salidas de los notebooks.
+=== 8d9e8d0f
+Comenta el código, no a la persona; pregunta cuando no estés seguro («¿qué pasa aquí si `orders` está vacío?»); aprueba cuando el cambio sea mejor que lo que hay, no cuando sea perfecto.

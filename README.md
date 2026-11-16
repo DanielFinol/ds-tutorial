@@ -2,7 +2,7 @@
 
 An interactive, exercise-driven tutorial in the practical skills of a working data scientist. It assumes you know the theory and basic Python; it teaches the tools, habits and gotchas of the day job. Every code cell runs **in the browser** (Python via [Pyodide](https://pyodide.org), SQL via DuckDB), with no server and no sign-up, and the site works offline once installed as a PWA.
 
-**Live site:** https://danielfinol.github.io/ds-tutorial/
+**Live site:** https://danielfinol.github.io/ds-tutorial/ · **En español:** https://danielfinol.github.io/ds-tutorial/es/
 
 ## What's in it
 
@@ -86,6 +86,18 @@ Commands for tools that can't run in a browser.
 - The last expression is displayed; DataFrames render as tables; matplotlib figures render as images.
 - An exercise has a `check` (assertions run after the learner's code; the assertion message is the feedback) and a `solution`. The test suite requires that the starter code does **not** pass and the solution **does**.
 - SQL cells run in DuckDB; the result is stored in `result` for checks. Call `dsw.register_duckdb()` in an earlier cell.
+
+## Translations
+
+The site is available in English and Spanish (`/es/`). Lesson code is single-sourced: a translation only supplies text.
+
+- `i18n/es/<lesson>.txt` holds the Spanish text of every prose block, hint, feedback message and code comment, keyed by a hash of the English text.
+- `scripts/i18n.mjs` (run automatically by `pnpm dev` and `pnpm build`) combines the English lesson with its translation file and writes `src/content/lessons/es/<lesson>.mdx`. Those generated files are not committed.
+- If English text changes, the build fails and prints the segments that need translating, with their new keys. To see all English segments and keys: `node scripts/i18n.mjs extract some-folder`.
+- Interface strings (buttons, navigation, runtime messages) live in `src/lib/i18n.ts`. Feedback from `dsw.same` is translated in `dsw.py` (`_t`).
+- Code, data, table and column names, and optional fenced code blocks in the labs stay in English.
+
+To add a language: add it to `LANGS` in `scripts/i18n.mjs` and `src/lib/i18n.ts`, add the interface strings, create `src/pages/<lang>/`, and write the `i18n/<lang>/*.txt` files.
 
 ## Deploying
 

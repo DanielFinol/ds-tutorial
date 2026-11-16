@@ -1,0 +1,127 @@
+=== 83452d55
+LLM en el flujo de trabajo con datos
+=== f5bf1447
+Usa un modelo de lenguaje como un componente más: salida estructurada que puedas interpretar y validar, un conjunto de evaluación, iteración del prompt medida con números, reintentos y coste.
+=== 51289e1c
+Poner tu trabajo en producción
+=== 0a4894c4
+En el trabajo de hoy se espera que un científico de datos ponga a trabajar los modelos de lenguaje sobre texto: clasificar tickets, extraer campos de documentos, resumir comentarios. La llamada al modelo es la parte fácil. El trabajo es todo lo que la rodea: **conseguir una salida que un programa pueda usar, medir la calidad con ejemplos etiquetados, mejorarla de forma deliberada y saber cuánto cuesta.**
+=== b07f717a
+> **Responsable de soporte:** Recibimos miles de tickets al mes. ¿Podemos etiquetar cada uno automáticamente con una categoría y una urgencia, y extraer el número de pedido?
+=== c7b7403f
+El navegador no puede guardar una clave de API de forma segura, así que esta lección usa `dsw.FakeLLM`, un sustituto que se comporta como un modelo alojado, incluidas sus malas costumbres: bloques de código Markdown, preámbulos parlanchines, etiquetas que casi son correctas y respuestas cortadas a mitad del JSON. Todo lo que construyas aquí funciona sin cambios contra un modelo real, que es lo que harás en el laboratorio del final.
+=== d25569ba
+ejemplos etiquetados con los que medir
+=== 046faf31
+## Un primer prompt y lo que devuelve
+=== 6d39a4f4
+Cinco respuestas, varios formatos. Un `json.loads` sobre ellas tumbaría un pipeline en cuestión de minutos. Hacen falta dos defensas: una **interpretación** tolerante y, después, una **validación** estricta.
+=== 9abcbe14
+**1.** Escribe `parse_reply(reply)`: devuelve como `dict` el objeto JSON de la respuesta, o `None` si no hay uno completo. Debe funcionar con bloques de código y con texto antes o después del JSON.
+=== 00336923
+Busca las llaves más externas con `re.search(r'\\{.*\\}', reply, re.DOTALL)`; si no hay coincidencia, devuelve None; si la hay, `json.loads(match.group(0))` dentro de un try/except.
+=== 1f5b52bb
+mejora esto: localiza primero la parte {...}
+=== a44d5d6a
+un JSON sin adornos debería interpretarse
+=== 69ce5bbd
+un JSON dentro de un bloque de código Markdown debería interpretarse
+=== 5d13913c
+un JSON rodeado de texto debería interpretarse
+=== de60dd5c
+una respuesta truncada debe devolver None, no lanzar un error
+=== d45bca96
+una respuesta sin JSON debe devolver None
+=== 164103f4
+Interpretado no es lo mismo que *correcto*: mira las categorías. `"Refund"` y `"late_delivery"` no están en la taxonomía. El código posterior que agrupe por categoría crearía grupos nuevos en silencio. Declara el contrato una sola vez con **pydantic** y rechaza todo lo que quede fuera.
+=== bf84e85f
+**2.** Define un modelo de pydantic `TicketLabel` con los campos `category` (uno de los seis valores de `dsw.TICKET_CATEGORIES`), `urgency` (`"low"`, `"medium"` o `"high"`) y `order_id` (un entero o `None`). Después escribe `validate(data)`, que devuelve un `TicketLabel`, o `None` cuando `data` es `None` o no es válido.
+=== 6befea7c
+`category: Literal['shipping_delay', 'damaged_item', 'refund_request', 'billing', 'product_question', 'account']`, `urgency: Literal['low', 'medium', 'high']`. En validate: devuelve None si data es None; `try: return TicketLabel(**data)` / `except ValidationError: return None`.
+=== 9a05000f
+demasiado permisivo: limítalo a los seis valores permitidos con Literal[...]
+=== dae8445a
+un registro válido debe devolver un TicketLabel
+=== 56b5156f
+'Refund' no es una categoría permitida: usa Literal con los seis valores exactos
+=== 1584d87a
+'urgent' no es una urgencia permitida
+=== bd804645
+si faltan campos, hay que rechazar el registro
+=== 0c0becc9
+si entra None, sale None
+=== 0a04fcd5
+## Mide antes de mejorar
+=== f1ca482a
+«Con los ejemplos que probé se ve bien» es la forma en que se ponen en producción funciones poco fiables basadas en LLM. Necesitas un **conjunto de evaluación** etiquetado (unos cientos de ejemplos bastan para empezar) y una función que convierta un prompt en números.
+=== b36217b5
+**3.** Escribe `evaluate(template, df)`. Para cada ticket de `df`, llama a un `dsw.FakeLLM()` nuevo con `template.format(text=...)`, e interpreta y valida la respuesta. Devuelve un diccionario con `valid_rate` (proporción de respuestas que pasan la validación) y `accuracy` (proporción de **todos** los tickets cuya categoría validada coincide con la `category` real; una respuesta no válida cuenta como error).
+=== c215443b
+`valid = [l is not None for l in labels]`; `correct = [l is not None and l.category == y for l, y in zip(labels, df['category'])]`; devuelve `{'valid_rate': sum(valid) / len(df), 'accuracy': sum(correct) / len(df)}`.
+=== b4321f35
+devuelve un diccionario con las claves valid_rate y accuracy
+=== f77b4290
+valid_rate debería ser {_e['valid_rate']:.3f}: la proporción de etiquetas que no son None
+=== 46cfceec
+accuracy debería ser {_e['accuracy']:.3f}: categorías correctas divididas entre TODOS los tickets (las respuestas no válidas cuentan como error)
+=== d6f45c82
+Menos de la mitad de los tickets recibe una etiqueta utilizable y correcta. Ahora hay un número que mover.
+=== aac61670
+## Mejora el prompt, un cambio cada vez
+=== 9d0ff606
+La mayoría de las respuestas no válidas se deben a que el modelo se inventa sus propios nombres de etiqueta y envuelve el JSON en texto. Las dos cosas se arreglan diciéndole exactamente lo que quieres.
+=== 94b1d395
+**4.** Escribe `PROMPT_V2`. Debe **enumerar los seis valores de categoría permitidos y los tres de urgencia**, e indicar al modelo que **responda solo con JSON, sin ningún otro texto**. Puedes escribirlo en español o en inglés, pero conserva al final la línea `Ticket: {text}`. Objetivo: `valid_rate` por encima de 0,9.
+=== d9f149e5
+Añade líneas como: 'category debe ser exactamente uno de: shipping_delay, damaged_item, refund_request, billing, product_question, account', 'urgency debe ser uno de: low, medium, high', 'order_id es el número de pedido como entero, o null', 'Responde solo con el objeto JSON, sin ningún otro texto.'
+=== 71b94b25
+conserva 'Ticket: {text}' como última línea
+=== d97e5a95
+enumera los seis valores de categoría permitidos, escritos exactamente como en dsw.TICKET_CATEGORIES
+=== c5769428
+valid_rate es {_r['valid_rate']:.2f}: indica al modelo que responda solo con JSON, sin ningún otro texto
+=== c2a78c2b
+accuracy debería mejorar respecto a PROMPT_V1
+=== 49b13adf
+Los problemas de formato han desaparecido casi por completo; lo que queda son errores de verdad. La siguiente palanca son los **ejemplos few-shot**: enséñale al modelo unos cuantos casos resueltos, sobre todo los que se confunden (una solicitud de reembolso que menciona un retraso en la entrega sigue siendo una solicitud de reembolso).
+=== 7917a5aa
+Conserva esta tabla. Cada cambio de prompt, de modelo o de proveedor añade una fila, medida con los mismos ejemplos. Esa es toda la disciplina, y es la misma que usas con cualquier modelo: **ningún cambio llega a producción sin un número**.
+=== 9bc5e06a
+## ¿Dónde sigue fallando?
+=== d92f6fcb
+Una precisión global oculta qué errores se están cometiendo. Una matriz de confusión sobre el conjunto de evaluación los muestra y te dice qué ejemplos añadir a continuación.
+=== 25087a6c
+Lee los fallos, no solo los conteos. Leer veinte casos erróneos es la forma más rápida de encontrar un ejemplo mal etiquetado, una definición de categoría ambigua o la instrucción que se te olvidó.
+=== aaf4b149
+## Reintentos, y lo que sigue sin ser válido
+=== 7e6cad54
+Una pequeña parte de las respuestas sigue siendo inservible (cortadas por el límite de tokens, por ejemplo). En producción esas se **reintentan**, y lo que siga fallando se envía a una cola de revisión humana en lugar de adivinar.
+=== c5630185
+una llamada real a la API varía por sí sola
+=== 10e13878
+## ¿Cuánto costará?
+=== 541262f7
+Los modelos alojados cobran por token, por separado la entrada y la salida, y un token equivale aproximadamente a cuatro caracteres en inglés. Haz la estimación antes de prometer nada; los ejemplos few-shot alargan todas y cada una de las llamadas.
+=== 4945fc6d
+Precios de ejemplo en USD por millón de tokens. Los precios cambian: consulta la página de precios de tu proveedor.
+=== e1a7a0d3
+Para una tarea tan sencilla, la diferencia de coste entre tamaños de modelo es grande y la diferencia de calidad puede ser nula. Se averigua pasando **los dos por el mismo conjunto de evaluación**, lo que supone otra fila en la tabla de resultados, no una opinión.
+=== 70915f09
+## ¿De verdad necesitas un LLM?
+=== 58daf3b1
+Si ya tienes unos miles de ejemplos etiquetados, un clasificador de texto clásico es más barato, más rápido y está completamente bajo tu control. Ejecuta siempre esta referencia:
+=== 19f5af61
+Con 2.000 etiquetas sobre tickets ordenados y repetitivos, el modelo clásico gana con claridad. Los LLM compensan su coste cuando **todavía no tienes etiquetas**, cuando las categorías cambian a menudo, cuando el texto es variado y desordenado, o cuando la tarea es de extracción o resumen en lugar de clasificación. Un patrón habitual es usar los dos: un LLM para etiquetar los primeros miles de ejemplos (con revisión por muestreo de una persona) y después un modelo clásico pequeño en producción.
+=== 23989e37
+Ejecútalo contra un modelo real
+=== 19e65421
+Cambia el sustituto por una API real. Aquí se usa el SDK de Python de Anthropic; otros proveedores siguen el mismo esquema. Crea una clave de API en la consola de tu proveedor y exponla como variable de entorno; nunca pegues una clave en un notebook ni la subas al repositorio.
+=== ac922a2d
+Las API actuales pueden **imponer tu esquema** en el lado del modelo, lo que elimina la mayoría de los problemas de interpretación que resolviste a mano más arriba. Con el SDK pasas directamente el modelo de pydantic:
+=== b77f6e86
+Después haz de verdad el trabajo de esta lección:
+=== e1ecff96
+1. Pasa tu conjunto de evaluación de 300 tickets por `classify` (escribe `data/tickets.parquet` con `dsw.export`) y añade una fila a tu tabla de resultados.
+2. Repítelo con un modelo más pequeño y barato de la lista actual de modelos del proveedor (en Anthropic, `claude-haiku-5-5`) y compara precisión, latencia y coste por cada 1.000 tickets. Elige con los números.
+3. Para trabajos masivos y sin urgencia (volver a etiquetar un año de tickets), usa el endpoint de **batch** del proveedor (`client.messages.batches.create(...)`): los resultados llegan de forma asíncrona y cuestan aproximadamente la mitad.
+4. Antes de enviar texto real de clientes a cualquier API externa, confirma con tu equipo de seguridad o legal que el proveedor y sus condiciones de retención de datos están aprobados, y elimina los datos personales que no necesites.

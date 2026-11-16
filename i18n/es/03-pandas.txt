@@ -1,0 +1,116 @@
+=== 560c1ee1
+pandas a ritmo de trabajo
+=== 4e84a0ce
+Cadenas de métodos, asignación segura, transformaciones por grupo, cambios de forma, series temporales y vectorización: el pandas que se escribe sobre tablas reales.
+=== 541a2fe9
+Trabajar con datos
+=== 4b972d79
+Cuando los datos salen del warehouse, la mayor parte del análisis ocurre en pandas. Esta lección entrena los modismos que usarás a diario, con el pandas actual (versión 3), en el que han cambiado dos fuentes clásicas de errores: las columnas de texto son un tipo `str` de verdad y el **copy-on-write** está siempre activo.
+=== 24121611
+## Asigna con `.loc`, no a través de una cadena
+=== a8be4904
+Con copy-on-write, todo resultado de una indexación se comporta como una copia. La clásica asignación encadenada de abajo ya no cambia nada (pandas te avisa). Haz la selección y la asignación en **una sola** llamada a `.loc`.
+=== 05bef301
+modifica una copia temporal: no tiene efecto
+=== a83c042a
+una sola llamada a .loc: funciona
+=== 493ae510
+**1.** Finanzas informa por tramos de tamaño de pedido. Añade a `orders` una columna `band` con `pd.cut`: `"small"` para totales por debajo de 50, `"medium"` de 50 a menos de 150, `"large"` de 150 a menos de 400 y `"xl"` de 400 en adelante.
+=== db4dc3b4
+`pd.cut(orders['total'], bins=[0, 50, 150, 400, float('inf')], labels=[...], right=False)`. Con `right=False`, cada tramo incluye su límite inferior.
+=== c2475084
+crea la columna band con pd.cut
+=== 1bd856d9
+{_bad.sum()} filas están en el tramo equivocado; p. ej. total={orders.loc[_bad, 'total'].iloc[0]} quedó en {orders.loc[_bad, 'band'].iloc[0]!r}. Revisa right=False para que 50 caiga en 'medium'.
+=== 056a01fb
+## Cadenas de métodos
+=== 26288df5
+Una cadena se lee de arriba abajo como una receta, no deja variables a medio hacer y es fácil de revisar. Las herramientas: `query` o filtros booleanos, `assign` (con una `lambda` para referirse a la tabla tal como va), `groupby().agg()` con agregaciones con nombre y `pipe` para tus propias funciones.
+=== 28d5b77d
+**2.** Construye `cust`: una fila por cliente con al menos un pedido completado, indexada por `customer_id`, con las columnas `n_orders`, `revenue`, `first_order` y `last_order` (fechas con hora).
+=== 9f3dc95e
+`.agg(n_orders=('order_id', 'count'), revenue=('total', 'sum'), first_order=('order_ts', 'min'), last_order=('order_ts', 'max'))`
+=== 7aa76146
+tus agregaciones con nombre
+=== 0e63e88f
+cust debe ser un DataFrame: termina la cadena con .agg(...)
+=== 72e51d38
+## Columnas por grupo: `transform`, `cumcount`, `diff`
+=== 94346991
+`agg` reduce cada grupo a una fila. Cuando necesitas un valor **por cada fila original** que depende de su grupo (el equivalente en pandas de una función de ventana de SQL), usa `transform` y compañía. Devuelven un resultado alineado con el índice original.
+=== 3ffc77f1
+sum(...) OVER (PARTITION BY customer_id)
+=== ff7f7a79
+suma acumulada dentro de cada cliente
+=== 8f63c0a0
+**3.** En `seq` (ya ordenada por cliente y fecha), añade `order_number` (1 para el primer pedido completado de un cliente, 2 para el segundo, ...) y `days_since_prev` (días desde el pedido completado anterior de ese cliente, como número decimal; vacío en los primeros pedidos).
+=== 9dcec18f
+`g.cumcount() + 1` numera las filas dentro de cada grupo. `g['order_ts'].diff()` da un Timedelta; divídelo entre `pd.Timedelta(days=1)` para obtener días con decimales.
+=== 2eb3ee43
+sustituye los ... por tu código
+=== 32b0911c
+order_number: usa groupby('customer_id').cumcount() + 1
+=== 7c393741
+days_since_prev debe estar vacío exactamente en el primer pedido de cada cliente
+=== a2318c3a
+days_since_prev: groupby('customer_id')['order_ts'].diff(), convertido a días
+=== 708b6ead
+## Cambiar de forma: de largo a ancho y de vuelta
+=== 4874c2da
+Los stakeholders leen tablas anchas; el análisis las quiere largas. `pivot_table` pasa a ancho; `melt`, a largo.
+=== 8792e2d2
+**4.** Construye `mix`: para cada mes de **2024** (índice: `Period` mensual, llamado `month`), la **parte de los ingresos completados de ese mes** que corresponde a cada dispositivo. Las columnas son los dispositivos; cada fila suma 1.
+=== 5e97995c
+Pivota a ingresos por mes x dispositivo y después `.div(p.sum(axis=1), axis=0)` (o `.pipe(lambda p: p.div(p.sum(axis=1), axis=0))` para seguir dentro de la cadena).
+=== f5f53492
+mix debe ser un DataFrame
+=== f9ba48da
+las columnas deben ser los dispositivos {sorted(_e.columns)}, y son {list(mix.columns)}
+=== b6f6807d
+se esperaban 12 filas mensuales para 2024 y hay {len(mix)}
+=== 0c2b12bc
+cada fila debe sumar 1: divide entre el total de la fila con .div(row_sum, axis=0)
+=== 450782be
+los valores no coinciden: pedidos completados de 2024, suma de total por mes y dispositivo, dividida entre el total del mes
+=== 6763431b
+## Series temporales: `resample` y `rolling`
+=== 6aabb433
+Con un índice de fechas, `resample` es un `groupby` que entiende el tiempo (y conserva los períodos vacíos, que un `groupby` sobre una fecha truncada descarta en silencio). `rolling` suaviza.
+=== 93c87a5b
+**5.** Crea `weekly`: los ingresos completados por semana (`resample("W")`), y `weekly_ma4`: su media móvil de 4 semanas.
+=== 60fc35ed
+`completed.set_index('order_ts')['total'].resample('W').sum()` y después `.rolling(4).mean()`.
+=== f88328ce
+weekly: completed.set_index('order_ts')['total'].resample('W').sum()
+=== 8fbd515c
+los valores de weekly no coinciden: suma de total por semana para los pedidos completados
+=== b7768c5c
+weekly_ma4 debe ser weekly.rolling(4).mean()
+=== 12ed7bd5
+## Vectoriza: nunca recorras las filas con un bucle
+=== 78fd0e27
+`apply(axis=1)` e `iterrows` llaman a Python una vez por fila. En la tabla de artículos, eso son más de cien mil llamadas. La aritmética de columnas hace el mismo trabajo en código compilado.
+=== 29ec6ff9
+**6.** El script del equipo de precios que ves abajo asigna un nivel de descuento fila a fila con `apply`. `items` ya tiene el precio de lista del producto, `price`. Sustitúyelo por una versión vectorizada con `numpy.select` que guarde los mismos valores en `items["tier"]`: `"deep"` cuando el precio unitario está por debajo del 75 % del `price` de lista, `"light"` cuando está por debajo del 100 % y `"full"` en el resto de los casos.
+=== c4729621
+`ratio = items['unit_price'] / items['price']` y después `np.select([ratio < 0.75, ratio < 1], ['deep', 'light'], default='full')`. Las condiciones se evalúan en orden.
+=== 2f270786
+lento, fila a fila
+=== de8bf16e
+vectorizado: sin apply y sin bucles
+=== 7d0b251b
+asigna el resultado vectorizado a items['tier']
+=== 7414b572
+los niveles no coinciden: ratio = unit_price / price; < 0.75 deep, < 1 light, si no full
+=== e396d94e
+## Tipos y memoria
+=== dd3d206e
+Revisa `dtypes` después de cada carga. Guardar el texto de baja cardinalidad como `category` y usar enteros del tamaño justo suele reducir la memoria a la mitad (y mucho más en tablas anchas con mucho texto), lo que a menudo marca la diferencia entre «cabe en RAM» y «no cabe».
+=== 7f1bf2cb
+Perfila un notebook lento
+=== 225b4fd1
+En tu proyecto `bramble-analysis` de la lección 1, abre un notebook y carga `data/order_items.parquet` y `data/products.csv`.
+=== 164a5cbc
+1. Mide la versión fila a fila del ejercicio 6 con `%timeit -n1 -r1 items.apply(tier, axis=1)` y tu versión vectorizada con `%timeit`.
+2. Ejecuta `%prun -l 10 items.apply(tier, axis=1)` y lee el perfil: casi todo el tiempo se va en la maquinaria por fila de pandas (`__getitem__`, construir una Series por fila), no en tu función.
+3. Guarda el resultado de las dos formas y compara tamaños: `items.to_csv("items.csv")` frente a `items.to_parquet("items.parquet")`. Parquet conserva los tipos, ocupa varias veces menos y se carga mucho más rápido. Úsalo por defecto para todo lo que escribas a disco.

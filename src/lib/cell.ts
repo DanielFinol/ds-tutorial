@@ -7,6 +7,7 @@ import { EditorState, Prec } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 import { tags as t } from '@lezer/highlight';
 import { basicSetup } from 'codemirror';
+import { runtime, type Lang } from './i18n';
 import { setCompleted } from './progress';
 import { runPython } from './py-client';
 
@@ -31,6 +32,9 @@ const theme = EditorView.theme({
   '.cm-tooltip': { backgroundColor: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text)' },
   '.cm-scroller': { overflowX: 'auto', lineHeight: '1.55' },
 });
+
+const lang: Lang = document.documentElement.lang === 'es' ? 'es' : 'en';
+const msg: Record<keyof (typeof runtime)['en'], string> = runtime[lang];
 
 function hash(s: string): string {
   let h = 5381;
@@ -87,7 +91,7 @@ export class PyCellElement extends HTMLElement {
           isSql ? sql() : python(),
           syntaxHighlighting(highlight),
           theme,
-          EditorView.contentAttributes.of({ 'aria-label': isSql ? 'SQL code' : 'Python code' }),
+          EditorView.contentAttributes.of({ 'aria-label': isSql ? msg.sqlCode : msg.pythonCode }),
           EditorView.updateListener.of((u) => {
             if (!u.docChanged) return;
             clearTimeout(saveTimer);
@@ -153,20 +157,20 @@ export class PyCellElement extends HTMLElement {
     runBtn.disabled = true;
     out.hidden = false;
     out.className = 'cell-out';
-    const status = Object.assign(document.createElement('p'), { className: 'status', textContent: 'Starting…' });
+    const status = Object.assign(document.createElement('p'), { className: 'status', textContent: msg.starting });
     out.replaceChildren(status);
 
     if (!auto) {
       const all = [...document.querySelectorAll<PyCellElement>('py-cell')];
       for (const prev of all.slice(0, all.indexOf(this))) {
         if (prev.hasRun) continue;
-        status.textContent = 'Running earlier cells first…';
+        status.textContent = msg.earlier;
         await prev.run({ auto: true });
       }
     }
 
     const check = this.dataset.check;
-    const r = await runPython(this.source(), { check, onStatus: (s) => (status.textContent = s) });
+    const r = await runPython(this.source(), { check, lang, onStatus: (s) => (status.textContent = s) });
     this.hasRun = true;
     out.replaceChildren();
     const pre = (text: string, cls: string) =>
@@ -181,7 +185,7 @@ export class PyCellElement extends HTMLElement {
     for (const b64 of r.images) {
       const img = document.createElement('img');
       img.src = `data:image/png;base64,${b64}`;
-      img.alt = 'Plot produced by the code above';
+      img.alt = msg.plotAlt;
       out.appendChild(img);
     }
     if (r.stderr) pre(r.stderr, 'stderr');
@@ -189,15 +193,15 @@ export class PyCellElement extends HTMLElement {
       pre(r.error, 'error');
       const all = [...document.querySelectorAll<PyCellElement>('py-cell')];
       const unsolved = all.slice(0, all.indexOf(this)).some((c) => c.dataset.check && !c.classList.contains('is-passed'));
-      if (unsolved) pre('Note: an earlier exercise on this page is not solved yet. Later cells build on it, so solve it first.', 'muted');
+      if (unsolved) pre(msg.unsolved, 'muted');
     }
     if (r.checkPassed === true) {
       out.classList.add('passed');
-      pre('✓ Correct.', 'success');
+      pre(msg.correct, 'success');
       store.set(`${this.key}:passed`, '1');
       this.markPassed();
     }
-    if (!out.childElementCount) pre('(no output)', 'muted');
+    if (!out.childElementCount) pre(msg.noOutput, 'muted');
     runBtn.disabled = false;
     return !r.error && r.checkPassed !== false;
   }

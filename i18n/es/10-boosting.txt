@@ -1,0 +1,116 @@
+=== fef2452d
+Gradient boosting y ajuste de hiperparámetros
+=== 507624c7
+Entrena, regulariza y ajusta árboles con gradient boosting usando scikit-learn y LightGBM, lee lo que el modelo ha aprendido y decide si supera a la referencia sencilla.
+=== 2fb5ddc1
+Modelos predictivos
+=== d46f04fa
+Los árboles con gradient boosting son el modelo potente por defecto para datos tabulares en la industria: manejan escalas mezcladas, valores ausentes e interacciones casi sin preprocesamiento. También sobreajustan con facilidad y tienen una docena de parámetros. Esta lección es la rutina de trabajo: **ajustar, mirar la diferencia entre entrenamiento y prueba, regularizar, afinar, interpretar y comparar con la referencia**.
+=== ee5e12ee
+La preparación recrea el proyecto de abandono de la lección anterior: entrenar con la foto del 1 de abril y evaluar fuera de tiempo con la del 1 de julio.
+=== b93764d7
+La referencia que hay que superar es el pipeline de regresión logística de la lección anterior:
+=== daa3b6a3
+## Ajusta con los valores por defecto y mira la diferencia
+=== 419b6c84
+El `HistGradientBoostingClassifier` de scikit-learn acepta los valores ausentes tal cual, y `categorical_features="from_dtype"` usa de forma nativa las columnas `category` de pandas: sin imputador, sin escalador y sin one-hot.
+=== 16f701b3
+**1.** Ajusta `gbm` con la configuración por defecto (más `categorical_features="from_dtype"` y `random_state=0`). Guarda su AUC sobre los datos de entrenamiento en `auc_train` y sobre la foto de prueba en `auc_test`.
+=== d0a272c6
+`HistGradientBoostingClassifier(categorical_features='from_dtype', random_state=0).fit(X_train, y_train)` y después `roc_auc_score(y, gbm.predict_proba(X)[:, 1])` para cada conjunto.
+=== c9f11099
+gbm debe ser un HistGradientBoostingClassifier ya ajustado
+=== 2eb3ee43
+sustituye los ... por tu código
+=== 5a2bc5af
+auc_train = roc_auc_score(y_train, gbm.predict_proba(X_train)[:, 1])
+=== f6f43b44
+auc_test = roc_auc_score(y_test, gbm.predict_proba(X_test)[:, 1])
+=== d00cfce4
+con la configuración por defecto el modelo debería sobreajustar claramente; ¿has cambiado los hiperparámetros?
+=== b697e4b7
+Casi perfecto en los datos de entrenamiento y *peor que la regresión logística* en datos nuevos. Los 100 árboles por defecto, con hasta 31 hojas cada uno, memorizan una tabla de cuatro mil filas. Míralo ocurrir árbol a árbol:
+=== 9c854109
+## Regulariza
+=== 5d29caaa
+Los parámetros que importan, por orden de utilidad:
+=== 6afac22d
+| Parámetro | Efecto | Rango habitual |
+| --- | --- | --- |
+| `learning_rate` | pasos más pequeños; necesita más árboles y generaliza mejor | 0.02 a 0.1 |
+| `max_iter` + `early_stopping` | deja de añadir árboles cuando una puntuación en datos reservados deja de mejorar | hasta 1.000 |
+| `max_depth` / `max_leaf_nodes` | árboles más simples | profundidad de 2 a 6 |
+| `min_samples_leaf` | ninguna hoja construida con un puñado de filas | 20 a 200 |
+| `l2_regularization` | encoge los valores de las hojas | 0 a 10 |
+=== 65636971
+**2.** Ajusta `gbm_reg` con `learning_rate=0.05`, `max_depth=3`, `min_samples_leaf=40`, `max_iter=500` y parada temprana sobre una partición de validación del 20 % (`early_stopping=True`, `validation_fraction=0.2`), manteniendo `categorical_features="from_dtype"` y `random_state=0`. Guarda su AUC de prueba en `auc_reg`.
+=== fdabd943
+`HistGradientBoostingClassifier(learning_rate=0.05, max_depth=3, min_samples_leaf=40, max_iter=500, early_stopping=True, validation_fraction=0.2, categorical_features='from_dtype', random_state=0).fit(X_train, y_train)`
+=== 2d0b795e
+gbm_reg debe ser un HistGradientBoostingClassifier ya ajustado
+=== 00640edb
+usa learning_rate=0.05, max_depth=3, min_samples_leaf=40
+=== fb3067b2
+activa early_stopping=True con validation_fraction=0.2 y max_iter=500
+=== 1192445c
+auc_reg = AUC de prueba de gbm_reg
+=== b02ed60a
+el modelo regularizado debería superar al de por defecto en la foto de prueba
+=== 44689812
+La diferencia entre entrenamiento y prueba se ha cerrado, y la puntuación de prueba está ahora a la par de la referencia o ligeramente por encima.
+=== 1023d8a0
+## Afina con validación cruzada, nunca con el conjunto de prueba
+=== e18ea23c
+Los valores elegidos a mano son un punto de partida. Para buscar como es debido, puntúa los candidatos con **validación cruzada sobre los datos de entrenamiento** y toca la foto de prueba una sola vez, al final. La búsqueda aleatoria cubre un espacio amplio con poco coste.
+=== 7eead133
+**3.** Ejecuta un `RandomizedSearchCV` sobre `param_distributions` con `n_iter=8`, `cv=3`, `scoring="roc_auc"` y `random_state=0`, con los datos de entrenamiento. Guarda la búsqueda ajustada en `search` y el AUC de prueba del mejor modelo en `auc_tuned`.
+=== bfc2eda3
+`RandomizedSearchCV(candidate, param_distributions, n_iter=8, cv=3, scoring='roc_auc', random_state=0).fit(X_train, y_train)`; una búsqueda ajustada predice con su mejor modelo: `search.predict_proba(X_test)`.
+=== c38cd6af
+search debe ser un RandomizedSearchCV ya ajustado
+=== e95ff6f0
+usa n_iter=8, cv=3, scoring='roc_auc'
+=== a76e927d
+auc_tuned = AUC de prueba de search.best_estimator_ (o simplemente search.predict_proba)
+=== 6f814bee
+Mira todos los candidatos, no solo el ganador. Cuando los primeros están dentro del ruido unos de otros, como aquí, quédate con el más simple y deja de afinar:
+=== 0905b196
+## El mismo modelo en LightGBM
+=== 828e91ba
+Muchos equipos usan **LightGBM** o **XGBoost** en lugar de la implementación de scikit-learn: son más rápidos con datos grandes y tienen más opciones. Los conceptos se corresponden uno a uno.
+=== 3167300c
+## ¿Qué ha aprendido?
+=== 548bec5c
+Nunca pongas en producción un modelo cuyo comportamiento no hayas inspeccionado. La **importancia por permutación** baraja una variable cada vez en datos reservados y mide cuánto cae la puntuación. A diferencia de las importancias de «ganancia» integradas, refleja lo que el modelo necesita para datos *nuevos*.
+=== a1bc9de3
+**4.** Calcula la importancia por permutación de `gbm_reg` sobre los datos de **prueba** (`n_repeats=5`, `scoring="roc_auc"`, `random_state=0`). Guarda en `imp` una Series con las importancias medias, indexada por el nombre de la variable y ordenada de más a menos importante.
+=== ebd6f3b3
+`r = permutation_importance(gbm_reg, X_test, y_test, n_repeats=5, scoring='roc_auc', random_state=0)` y después `pd.Series(r.importances_mean, index=X_test.columns).sort_values(ascending=False)`.
+=== 009be1c3
+imp debe ser una Series con un valor por variable
+=== a65185cb
+indexa imp por el nombre de la variable: pd.Series(result.importances_mean, index=X_test.columns)
+=== 72ade178
+ordena imp de más a menos importante
+=== b673c694
+usa gbm_reg, X_test, y_test, n_repeats=5, scoring='roc_auc', random_state=0
+=== 0a7c8573
+Después mira la *forma* de las relaciones principales con la dependencia parcial: cómo se mueve el riesgo previsto cuando cambia una variable, promediando sobre los datos.
+=== a9c3d809
+la dependencia parcial necesita columnas de tipo float
+=== d0eded42
+El riesgo sube de forma constante con los días desde el último pedido y baja con la frecuencia de compra: las dos cosas tienen sentido. Las variables correlacionadas se reparten la importancia (la recencia y `recency_ratio` llevan información que se solapa), así que lee las importancias por grupos, no como una clasificación estricta.
+=== 6a6927ce
+## Decide
+=== be69000e
+Con unos pocos miles de filas y relaciones en su mayoría suaves, un boosting bien regularizado y la regresión logística terminan a una centésima, más o menos, el uno de la otra. Es un resultado normal, y útil: las diferencias son menores que el ruido entre períodos de prueba, así que la elección debe hacerse por **coste de mantenimiento**. El modelo lineal es más fácil de explicar, depurar y monitorizar. El boosting se gana su sitio cuando hay más datos, interacciones fuertes o muchas variables desordenadas, y ahora sabes cómo averiguar en qué caso estás.
+=== b112f40d
+Explica predicciones con SHAP; afina con Optuna
+=== 19a9b097
+Dos herramientas que encontrarás en la mayoría de los equipos y que no están disponibles en el navegador:
+=== 124c120b
+**SHAP** atribuye cada predicción individual a las variables: es la respuesta habitual a «¿por qué *este* cliente tiene una puntuación de 0,9?»:
+=== edbbf7f7
+**Optuna** sustituye la búsqueda aleatoria por una guiada y descarta pronto las pruebas sin futuro:
+=== fb808575
+Compara el AUC de prueba afinado con la tabla de arriba. Si cuarenta pruebas te dan menos que la diferencia entre dos períodos de prueba, ya sabes dónde conviene dedicar el próximo día de trabajo.

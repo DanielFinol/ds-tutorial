@@ -1,0 +1,129 @@
+=== e30d2ca7
+Poner un modelo en producción y monitorizarlo
+=== 0a5d995c
+Convierte un modelo entrenado en un proceso programado de puntuación con comprobaciones de entrada y de salida, y después monitorízalo: detección de deriva con PSI y un informe que lanza alertas.
+=== 51289e1c
+Poner tu trabajo en producción
+=== e37ad4f4
+Un modelo dentro de un notebook no ha entregado nada. En la empresa media, «producción» rara vez significa un servicio de baja latencia; normalmente significa un **proceso batch programado**: cada lunes, puntuar a todos los clientes activos y escribir una tabla que lee la herramienta de CRM. Esta lección construye el núcleo de ese proceso y la monitorización que te dice cuándo dejar de fiarte de él.
+=== 34b39823
+## 1. Empaqueta el modelo como un artefacto
+=== 1e6cd5b2
+Guarda el pipeline ajustado junto con los datos que alguien necesitará dentro de seis meses: con qué se entrenó, con qué versión de la librería y qué entradas espera.
+=== 9824eafe
+lo que hace el proceso de puntuación al arrancar
+=== ca407225
+## 2. El proceso de puntuación
+=== 67db7f7c
+La función de puntuación es el contrato entre tú y quienes usan las puntuaciones. Debe **rechazar de forma visible las entradas incorrectas** en lugar de producir basura verosímil, y su salida debe llevar metadatos suficientes para rastrear cualquier número hasta un modelo y una fecha.
+=== 76ee8e5d
+**1.** Completa `score_customers(snapshot, bundle, scored_at)`. Debe:
+=== d41f2458
+- lanzar `ValueError` si falta en `snapshot` alguna columna de `bundle["features"]`, o si `customer_id` contiene duplicados;
+- devolver un DataFrame con las columnas `customer_id`, `p_churn`, `risk_decile` (1 = el 10 % con mayor riesgo, 10 = el de menor riesgo), `model_version` y `scored_at`.
+=== 08a63575
+`if snapshot['customer_id'].duplicated().any(): raise ValueError(...)`. Deciles: `pd.qcut(p.rank(method='first', ascending=False), 10, labels=range(1, 11)).astype(int)`, donde `p` es una Series de probabilidades.
+=== 6af58425
+1. rechaza los customer_id duplicados
+=== 5eb78ed1
+2. p_churn a partir de bundle["model"].predict_proba(snapshot[bundle["features"]])
+=== 45b7fa4b
+3. risk_decile con pd.qcut sobre el rango de p_churn (1 = mayor riesgo)
+=== eebc682f
+las columnas deben ser customer_id, p_churn, risk_decile, model_version, scored_at; y son {list(getattr(_o, 'columns', []))}
+=== 5410764b
+una fila por cliente
+=== 082e686d
+p_churn = predict_proba(...)[:, 1]
+=== a6daa83a
+risk_decile debe tomar los valores del 1 al 10
+=== d8cde696
+el decil 1 debe contener las puntuaciones de mayor riesgo
+=== c3351549
+incluye model_version y scored_at en todas las filas
+=== 9afdebf9
+este caso debería lanzar ValueError: {_why}
+=== a4a072e3
+El último paso del proceso escribe las puntuaciones donde otros puedan leerlas, **añadiendo** una partición con fecha en lugar de sobrescribir, para que cada ejecución pasada se pueda auditar y reevaluar cuando se conozcan los resultados:
+=== 2326f6e1
+## 3. Monitorización: ¿ha cambiado la entrada?
+=== 43a29335
+Los modelos fallan en silencio. Nadie recibe un error cuando un equipo que está antes en la cadena cambia una unidad, cuando un evento de tracking deja de enviarse o cuando cambia la composición de los clientes; simplemente, las puntuaciones empeoran. Aquí los resultados reales llegan 90 días tarde, así que la primera línea de defensa es vigilar las **entradas**.
+=== 09a04818
+La medida de deriva estándar en la industria es el **Population Stability Index** (PSI): divide una variable en tramos usando los cuantiles de los datos de entrenamiento y compara la proporción de filas por tramo entre el entrenamiento y ahora.
+=== 555b38ca
+`PSI = Σ (actual% − esperado%) × ln(actual% / esperado%)`
+=== 5b74f6af
+Regla práctica: por debajo de 0,1, estable; de 0,1 a 0,2, merece un vistazo; por encima de 0,2, investiga antes de fiarte de las puntuaciones.
+=== acb88dad
+**2.** Implementa `psi(expected, actual, bins=10)` para Series numéricas. Usa como límites de los tramos los cuantiles de `expected` (`np.quantile(expected, np.linspace(0, 1, bins + 1))`), elimina los límites duplicados, amplía los límites exteriores a ±infinito, ignora los valores ausentes y pon un mínimo de `1e-4` a cada proporción para no dividir entre cero.
+=== 0cfa69d0
+`e = np.clip(np.histogram(expected, edges)[0] / len(expected), 1e-4, None)`, lo mismo para `actual` como `a`, y después `float(np.sum((a - e) * np.log(a / e)))`.
+=== b138aef8
+proporción de filas por tramo en cada muestra (np.histogram), con un mínimo de 1e-4, y después la fórmula del PSI
+=== 84dee0ac
+devuelve el valor del PSI
+=== 9f038bbf
+el PSI de una muestra frente a sí misma debe ser 0
+=== fb794591
+valor incorrecto para {_col}: proporciones = np.histogram(x, edges)[0] / len(x), con un mínimo de 1e-4; PSI = sum((a - e) * log(a / e))
+=== 3ceed925
+una variable multiplicada por 100 debería producir un PSI muy grande
+=== 0dec93dd
+## 4. Un informe de deriva que lanza alertas
+=== 389a428a
+Ahora, el escenario con el que todo científico de datos se acaba encontrando. Llega la entrada de puntuación de este mes. Nada ha fallado. Pero la semana pasada alguien «mejoró» un pipeline anterior en la cadena:
+=== c6ae2cbf
+ahora llega en céntimos
+=== a5f93c7c
+la exportación de la encuesta se rompió en silencio
+=== 59644b81
+**3.** Escribe `drift_report(reference, current, features)`. Para cada variable numérica, devuelve su `psi`, la proporción de valores ausentes en cada muestra (`missing_ref`, `missing_cur`) y un `status`: `"alert"` si el PSI es de al menos 0,2 **o** si la proporción de ausentes ha cambiado en más de 0,1 (diez puntos porcentuales), `"watch"` si el PSI es de al menos 0,1 y `"ok"` en los demás casos. Devuelve un DataFrame indexado por variable y ordenado por `psi` de mayor a menor.
+=== 9fccf3e8
+Por columna: `m_ref, m_cur = reference[col].isna().mean(), current[col].isna().mean()`; `value = psi(reference[col], current[col]) if current[col].notna().any() else float('nan')`; el status es 'alert' si `value >= 0.2 or abs(m_cur - m_ref) > 0.1`, 'watch' si `value >= 0.1` y 'ok' en otro caso. Convierte los booleanos con `.astype(float)` antes de llamar a psi.
+=== d7e33d00
+rows[col] = {"psi": ..., "missing_ref": ..., "missing_cur": ..., "status": ...}
+=== e1ec753d
+el informe necesita las columnas psi, missing_ref, missing_cur, status
+=== 6d020c60
+una fila por variable, indexada por el nombre de la variable
+=== 83ebddce
+spend_90d (cambió de unidad) debería ser una alerta
+=== 85441ec0
+min_csat_180d quedó completamente ausente: un cambio de más de 0,1 en la proporción de ausentes debe ser una alerta aunque su PSI no se pueda calcular de forma fiable
+=== ef39d11a
+las variables que no han cambiado, como age, deberían estar en ok
+=== 1e6521d7
+las variables estables deberían estar en ok con datos limpios
+=== 7cc4ebd1
+ordena por psi, de mayor a menor
+=== f019eda4
+Intégralo en el proceso como una **barrera**: si alguna variable está en alerta, no publiques puntuaciones; avisa al responsable. Una campaña que sale tarde es una molestia. Una campaña dirigida a los diez mil clientes equivocados cuesta dinero y confianza.
+=== f988d10a
+## 5. Cierra el ciclo cuando lleguen los resultados
+=== 46a90a6c
+La monitorización de las entradas es un aviso temprano. El veredicto real llega cuando las etiquetas maduran: 90 días después de cada ejecución puedes calcular cómo le fue realmente al modelo, a partir de las puntuaciones que archivaste.
+=== 24e22d50
+se conoce 90 días después
+=== 86816975
+Pon esos tres números en un dashboard pequeño con umbrales acordados de antemano (por ejemplo: reentrenar si el AUC baja de 0,74 o si las tasas prevista y real difieren en más de cinco puntos durante dos meses seguidos). «Reentrenar cuando se vea mal» no es una política; un umbral que alguien ha aprobado, sí.
+=== 57b06698
+Conviértelo en un comando y prográmalo
+=== 39ce5d2e
+Pon la lógica de puntuación en tu paquete `bramble` y dale un punto de entrada que reciba la fecha de ejecución como argumento, para que cualquier ejecución se pueda repetir para cualquier fecha:
+=== 3cdb6adf
+Prográmalo con lo que tu equipo ya use. Las opciones reales más sencillas:
+=== fa096b3e
+Los equipos más grandes usan un orquestador (Airflow, Dagster, Prefect) para lo mismo, con reintentos, dependencias entre procesos y una interfaz. El proceso en sí no cambia: un comando que recibe una fecha, termina con un código distinto de cero si falla y se puede volver a ejecutar sin riesgo.
+=== 3d10fd83
+Sírvelo como una API en un contenedor
+=== 500e3fc9
+Cuando otro sistema necesita una puntuación bajo demanda (un agente de soporte que abre la ficha de un cliente), envuelve el mismo modelo en un pequeño servicio web. **FastAPI** valida las peticiones con los modelos de pydantic que conociste en la lección 13.
+=== 640d1ea1
+Empaquétalo con un `Dockerfile` para que se ejecute igual en cualquier sitio:
+=== e6e0df27
+La imagen contiene el Python exacto, las versiones de las librerías (de `uv.lock`) y el archivo del modelo. En eso se convierte «en mi máquina funciona» cuando tiene que funcionar en la de otra persona.
+=== eb57536b
+## Y ahora, ¿qué?
+=== a14fdbe5
+Ya has hecho, con tus propias manos, el ciclo central del trabajo: obtener datos con SQL, darles forma y limpiarlos, analizar y someter a prueba un cambio, construir y evaluar un modelo, y ponerlo en producción con comprobaciones. El mejor paso siguiente es repetir ese ciclo con datos de tu propio trabajo, usando como plantilla el proyecto local de los laboratorios. Vuelve a cualquier lección para consultar los modismos; los ejercicios se reinician con el botón **Restablecer** de cada celda.

@@ -1,0 +1,102 @@
+=== c2b68e15
+Previsión de la demanda
+=== 31680b51
+Prepara una serie diaria, supera la referencia estacional ingenua con un modelo basado en variables, haz un backtest honesto y entrega un rango en lugar de un único número.
+=== 2fb5ddc1
+Modelos predictivos
+=== 158e1115
+La previsión es una de las peticiones más frecuentes que recibe un científico de datos, y la mayor parte del valor viene de la rutina, no de modelos exóticos: **una serie limpia, una referencia sólida, un backtest y un rango honesto**.
+=== 8c43ddb2
+> **Sam (Cadena de suministro):** Necesito previsiones diarias de unidades de Kitchen para las próximas cuatro semanas, para planificar los turnos del almacén. ¿Y cuánto se puede equivocar?
+=== 73cd4285
+## 1. Haz que la serie sea regular
+=== 0821f4ee
+Los modelos y las ventanas móviles suponen una fila por día. Los datos reales tienen huecos: días en que falló la exportación, o días sin ventas que nunca se escribieron. Cuenta antes de fiarte.
+=== 42e970cf
+**1.** A Bedding le faltan filas. Construye `bedding`: una Series con las `units` de Bedding indexada por fecha y con un **índice diario completo** (los días que faltan aparecen como `NaN`). Guarda el número de días que faltan en `n_missing` y rellénalos por interpolación lineal en `bedding_filled`.
+=== 51eafa4a
+`demand[demand['category'] == 'Bedding'].set_index('date')['units'].asfreq('D')`, y después `.isna().sum()` e `.interpolate()`.
+=== 574e07d1
+bedding debe tener una entrada por día natural ({len(_b)}); usa .asfreq('D')
+=== 44ef358a
+n_missing = bedding.isna().sum()
+=== 0d1cead1
+bedding_filled no debe tener valores ausentes: bedding.interpolate()
+=== 1841593f
+rellena con interpolación lineal: bedding.interpolate()
+=== 827a0090
+En Outdoor hay otra trampa: tres días con **cero** unidades en junio. Fue una rotura de stock. Las ventas fueron cero; la *demanda*, no. Si entrenas con esos días, el modelo aprende que la demanda se hunde a mediados de junio. Trata esos días como ausentes, no como ceros, y pide al equipo de operaciones el registro de roturas de stock.
+=== d440092a
+## 2. Conoce los patrones
+=== 5499c879
+Tendencia y estacionalidad anual (media de 28 días)
+=== 81b80abb
+Día de la semana (0 = lunes)
+=== e84d3446
+Días de promoción frente a días normales
+=== 8c9396c4
+Crecimiento, un ciclo semanal marcado, un pico en noviembre y diciembre y un aumento con las promociones. Cualquier previsión tiene que respetar los cuatro.
+=== cbe98384
+## 3. Primero, la referencia
+=== fb897bea
+La previsión **estacional ingenua** (seasonal naive) repite la última semana observada. No cuesta nada, a menudo es difícil de superar y te dice qué significa «bueno» para esta serie. Para el error, usa el **WAPE** (error absoluto total dividido entre las unidades reales totales): a diferencia del MAPE, es estable cuando algunos días son pequeños, y «nos desviamos un 15 % del volumen» es algo que Sam puede usar.
+=== 28167266
+**2.** Construye `naive`: una Series con el mismo índice que `test_y` que repita cuatro veces los **últimos 7 días de `train_y`**. Guarda su error en `wape_naive`.
+=== d154cab9
+`pd.Series(np.tile(train_y.iloc[-7:].to_numpy(), HORIZON // 7), index=test_y.index)`
+=== 5a5a4164
+naive debe ser una Series con el mismo índice que test_y
+=== 240a8488
+repite cuatro veces los últimos 7 valores de entrenamiento: np.tile(train_y.iloc[-7:].to_numpy(), 4)
+=== b7be0697
+wape_naive = wape(test_y, naive)
+=== 5f441f99
+## 4. Un modelo basado en variables
+=== 2aec1bf6
+El enfoque más usado en la industria trata la previsión como una regresión sobre **variables de calendario, factores conocidos de antemano y valores retardados**. Una regla decide qué retardos son legales: para prever 28 días de una sola vez, una variable del día *t* solo puede usar datos del día *t − 28* o anteriores. Cualquier cosa más reciente es una fuga de información, porque no la tendrás cuando hagas la previsión.
+=== dbb27b9c
+**3.** Completa `make_features(df)`. Recibe la tabla diaria de Kitchen (columnas `units`, `on_promo`) y devuelve un DataFrame con el mismo índice y estas columnas: `dow` (día de la semana), `month`, `on_promo` (como 0/1; el calendario de promociones se planifica con antelación, así que se conoce), `lag_28`, `lag_35`, `lag_364` (las unidades de ese número de días atrás) y `roll_28_7` (la media de los 7 días que terminan 28 días atrás).
+=== ba6c7f80
+`X['lag_28'] = df['units'].shift(28)` y lo mismo para 35 y 364; `X['roll_28_7'] = df['units'].shift(28).rolling(7).mean()`.
+=== b9b1e995
+lag_28, lag_35, lag_364 y roll_28_7
+=== 9e7e47ac
+las columnas deben ser dow, month, on_promo, lag_28, lag_35, lag_364, roll_28_7; y son {list(_o.columns)}
+=== b575ac7a
+lag_{_k} = df['units'].shift({_k})
+=== 95e557d2
+roll_28_7 = df['units'].shift(28).rolling(7).mean(): primero el shift y después el rolling, para que no se cuelen datos recientes
+=== 7fd73a89
+El gradient boosting con pérdida de Poisson encaja con los datos de conteo. Las primeras 364 filas no tienen el retardo de hace un año, así que el entrenamiento empieza después de ellas.
+=== 349357ef
+Una alternativa clásica que no necesita construir variables es el **suavizado exponencial** (Holt-Winters), que conviene tener como segunda referencia:
+=== 3d184b0e
+## 5. Backtest: una sola ventana de prueba no demuestra nada
+=== fdfa7aaa
+Un único mes reservado puede favorecer o castigar a un modelo por pura suerte. Un **backtest de origen móvil** repite el ejercicio en varias fechas pasadas, entrenando siempre solo con datos anteriores al inicio de la previsión.
+=== fb874584
+**4.** Haz el backtest de las seis ventanas de 28 días que empiezan en las fechas de `starts`. Para cada una, calcula el WAPE de la previsión estacional ingenua (los últimos 7 días anteriores al inicio, repetidos) y el de `fit_predict(start)`. Guarda los resultados en `bt`: un DataFrame indexado por fecha de inicio con las columnas `naive` y `model`.
+=== e8cd3932
+Dentro del bucle: `last_week = y[y.index < start].iloc[-7:].to_numpy()`; `rows[start] = {'naive': wape(actual, np.tile(last_week, 4)), 'model': wape(actual, fit_predict(start))}`.
+=== 442de1b6
+rows[start] = {"naive": ..., "model": ...}
+=== 3dcb9c9b
+bt debe tener 6 filas y las columnas naive, model
+=== 6e928310
+naive: los 7 días estrictamente anteriores a start (y[y.index < start].iloc[-7:]), repetidos 4 veces
+=== bb0be18b
+model: wape(actual, fit_predict(start))
+=== 39420fdb
+El modelo gana de media, pero no en todas las ventanas. Esa es la imagen realista que hay que comunicar: *«alrededor de un 16 % de error en un mes típico frente a un 21 % del método ingenuo, con un rango del 13 % al 20 %»*. Si hubieras mirado una sola ventana, podrías haber concluido cualquier cosa.
+=== b1e29990
+## 6. Da un rango, no un número
+=== 18500a32
+La segunda pregunta de Sam era «¿cuánto se puede equivocar?». El personal del almacén debe planificarse para un escenario de demanda alta, no para la media. Entrena el mismo modelo con una **pérdida cuantílica** para prever directamente los percentiles 10 y 90.
+=== 7563c241
+Comprueba siempre la cobertura con datos reservados, como se imprime arriba. Si claramente menos del 80 % de los días cae dentro de una «banda del 80 %», la banda es demasiado estrecha: dilo, o ensánchala usando los errores de tu backtest. El mensaje para Sam: *«Planifica unas X unidades para las cuatro semanas; dimensiona el personal para hasta Y en los días pico.»*
+=== f83372b4
+Prevé muchas series con una librería especializada
+=== 9f623de1
+En el trabajo rara vez prevés una sola serie; prevés cientos (cada categoría, cada almacén). Librerías como **statsforecast** ajustan y hacen backtest de modelos clásicos sobre muchas series con una sola llamada:
+=== 5d5f05b5
+Calcula el WAPE por serie y por modelo a partir de `cv` y compáralo con tu modelo de boosting en Kitchen. Después decide, categoría por categoría, si la maquinaria adicional del modelo basado en variables compensa. En la serie de Outdoor, enmascara antes los días de rotura de stock y observa cuánto cambia la previsión de junio.

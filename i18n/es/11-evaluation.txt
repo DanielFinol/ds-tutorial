@@ -1,0 +1,99 @@
+=== 3eb46ac9
+Evaluar un modelo para tomar una decisión
+=== 91ae5340
+Más allá del AUC: calidad de la ordenación al volumen sobre el que puedes actuar, calibración, elección del umbral a partir de costes y beneficios, estabilidad en el tiempo y rendimiento por segmento.
+=== 2fb5ddc1
+Modelos predictivos
+=== 0cf94a0a
+«El AUC es 0,77» responde a una pregunta que nadie en la empresa ha hecho. Las preguntas del equipo de retención son: *si contactamos a 500 clientes, ¿cuántos abandonarán de verdad? ¿Podemos fiarnos de que una puntuación de 0,8 signifique un 80 %? ¿A cuántos deberíamos contactar? ¿Seguirá funcionando el trimestre que viene?* Esta lección convierte un modelo ajustado en esas respuestas.
+=== e2ee3c87
+## Calidad de la ordenación allí donde actúas
+=== 34f6164d
+El equipo de retención puede contactar a un número limitado de clientes. Lo que importa es lo buena que es la **parte alta de la lista**, no la calidad media de la ordenación de todos.
+=== d3d586ed
+**1.** Para el 10 % de los clientes con las puntuaciones más altas, calcula `precision_top10` (la proporción que abandonó de verdad) y `lift_top10` (esa precisión dividida entre la tasa base de abandono).
+=== 3f28a491
+`top = scored.nlargest(k, 'p')`; la precisión es `top['churned'].mean()`; el lift se obtiene dividiendo entre `scored['churned'].mean()`.
+=== a35b6d81
+los k clientes con mayor puntuación
+=== 2eb3ee43
+sustituye los ... por tu código
+=== 46255fc5
+precision_top10 = media de churned entre las k filas con mayor p (scored.nlargest(k, 'p'))
+=== 71616cd1
+lift_top10 = precision_top10 / tasa de abandono global
+=== 2ba69b97
+La imagen completa es una **tabla de ganancias**: ordena por puntuación, corta en diez grupos iguales y muestra qué contiene cada uno. Es el resultado de evaluación más útil que puedes enseñar a un equipo de negocio.
+=== 90359f89
+Compara siempre con lo que el equipo hace hoy. Una regla manual habitual es «contactar a todo el que lleve 60 días sin pedir»:
+=== 0febb8d0
+El titular honesto es la *diferencia entre esas dos líneas*, no el AUC. A este volumen, el modelo no es mejor que la regla que el equipo ya usa. Sus ventajas están en lo más alto de la lista (el primer decil de arriba tiene alrededor de un 90 % de clientes que abandonan) y en que produce una probabilidad con la que se puede hacer aritmética, que es en lo que se apoyan las dos secciones siguientes. Comunícalo sin rodeos: le dice al equipo exactamente qué les aporta el modelo y qué no.
+=== 8fa52f7f
+## Calibración: ¿puedes fiarte del número?
+=== 58928054
+Si la puntuación se usa como probabilidad (para calcular un valor esperado, o si se le muestra a un agente como «82 % de riesgo»), debe estar **calibrada**: entre los clientes con una puntuación en torno a 0,8, alrededor del 80 % debería abandonar.
+=== f82be9ac
+**2.** Construye `calib`: divide las puntuaciones en 10 tramos de igual tamaño con `pd.qcut(scored["p"], 10, labels=False)` y, para cada tramo, calcula `mean_pred` (puntuación media), `observed` (tasa de abandono real) y `n`. Calcula también `brier`, la puntuación de Brier (la media del cuadrado de la diferencia entre la puntuación y el resultado).
+=== f1a2bba0
+`scored.assign(bin=pd.qcut(scored['p'], 10, labels=False)).groupby('bin').agg(mean_pred=('p', 'mean'), observed=('churned', 'mean'), n=('churned', 'size'))`
+=== 8bf57c78
+calib debe tener 10 filas, una por tramo de puntuación
+=== d63f5c4d
+brier = ((scored['p'] - scored['churned']) ** 2).mean()
+=== 1eb85382
+Calibración (fuera de tiempo)
+=== db8a86ee
+Los puntos se pegan a la diagonal: estas puntuaciones se pueden usar como probabilidades. La regresión logística suele salir bien calibrada de fábrica; los árboles con boosting y cualquier cosa entrenada con datos remuestreados a menudo no, y necesitan `CalibratedClassifierCV` o, como mínimo, esta comprobación.
+=== 2b85f21a
+## A cuántos contactar: un umbral que sale de las cuentas
+=== 73c255aa
+Nunca uses 0,5 por defecto. El punto de corte se deduce de los costes y los beneficios, que te da el negocio:
+=== 2488fb0c
+- la oferta de recuperación cuesta **8 $** por cliente contactado (vale y gestión);
+- retiene al **25 %** de los clientes en riesgo de abandono a los que llega;
+- un cliente retenido vale **120 $** de margen durante el año siguiente;
+- contactar a un cliente que no iba a abandonar solo cuesta los 8 $.
+=== 3faf843d
+**3.** Para cada profundidad de campaña `k`, del 5 % al 100 % de los clientes en pasos de 5, calcula el beneficio esperado de contactar al `k` % con mayor puntuación: `clientes_en_riesgo_alcanzados × 0,25 × 120 − clientes_contactados × 8`. Guarda los resultados en una Series `profit` indexada por `k` (5, 10, ..., 100) y la mejor profundidad en `best_k`.
+=== 272e5a8c
+Construye un diccionario en un bucle o una comprensión: `n = int(len(ranked) * k / 100)`, `ranked.head(n)['churned'].sum() * SAVE_RATE * VALUE - n * COST`, y después `pd.Series(...)` e `.idxmax()`.
+=== c1a3ba48
+profit debe ser una Series indexada por 5, 10, ..., 100
+=== 621c44ae
+para cada k: n = int(len(ranked) * k / 100); profit = ranked.head(n)['churned'].sum() * SAVE_RATE * VALUE - n * COST
+=== d98cbfdf
+best_k = profit.idxmax()
+=== ff8483bc
+Como las puntuaciones están calibradas, la misma respuesta sale de la aritmética: contacta a un cliente cuando `p × 0,25 × 120 > 8`, es decir, cuando **p > 0,27**. Mira dónde cae ese umbral en tu tabla de ganancias. Acompaña la recomendación con sus supuestos: si la tasa de retención fuera del 10 % en lugar del 25 %, el punto de equilibrio sería p > 0,67 y la campaña se reduciría, más o menos, a la cuarta parte superior.
+=== d98ad68b
+> La tasa de retención del 25 % es en sí misma un supuesto hasta que se pruebe. El plan de lanzamiento correcto reserva un grupo de control aleatorio que no recibe la oferta, para poder medir el efecto *incremental*: el test A/B de la lección 7.
+=== aeb8f6e4
+## ¿Durará? Estabilidad en el tiempo
+=== f2eb95dd
+Un modelo se entrena una vez y se usa durante meses. Evalúalo como se va a usar: en **períodos posteriores a aquel con el que se entrenó**, vigilando tanto la calidad de la ordenación como si su predicción media sigue coincidiendo con la realidad.
+=== 3bd02466
+**4.** Entrena un modelo con la foto del **1 de enero de 2024** usando `make_model()`. Evalúalo con las fotos del 1 de abril, el 1 de julio y el 1 de octubre de 2024. Construye `drift`: una fila por fecha de corte (índice: las cadenas de las fechas) con las columnas `auc`, `mean_pred` (probabilidad media prevista) y `actual` (tasa de abandono real).
+=== bd2cb8fe
+Dentro del bucle: `p = old_model.predict_proba(snap)[:, 1]` y después `rows[cutoff] = {'auc': roc_auc_score(snap['churned'], p), 'mean_pred': p.mean(), 'actual': snap['churned'].mean()}`.
+=== 9d47e30e
+rows[cutoff] = {"auc": ..., "mean_pred": ..., "actual": ...}
+=== dec77fc4
+drift debe tener una fila por fecha de corte, indexada por la cadena de la fecha
+=== c973c969
+drift necesita las columnas auc, mean_pred, actual
+=== ef91d8c7
+para cada foto: p = old_model.predict_proba(snap)[:, 1]; auc = roc_auc_score(snap['churned'], p); mean_pred = p.mean(); actual = snap['churned'].mean()
+=== 65f9de3e
+La calidad de la ordenación (AUC) se mantiene, pero la tasa de abandono está bajando mientras el modelo sigue prediciendo el nivel antiguo: en octubre sobrestima en varios puntos. La ordenación sigue sirviendo para «contactar al 20 % superior»; las *probabilidades* (y las cuentas de beneficio de arriba) se están desviando y necesitarían recalibración o reentrenamiento. Qué métrica importa depende de cómo se use la puntuación, y por eso se vigilan las dos.
+=== 6aa2e215
+## Rendimiento por segmento
+=== bfe7e865
+Una media puede esconder un segmento en el que el modelo falla o está mal calibrado. Revisa los segmentos que le importan al negocio, con sus tamaños de muestra.
+=== 42c779ff
+Las tasas previstas y reales coinciden con un margen de un par de puntos en todos los canales, y el AUC es parecido entre ellos: ningún segmento está mal atendido. Cuando esta tabla muestre una diferencia, es un hallazgo que hay que comunicar junto a la cifra principal, no después del lanzamiento.
+=== 126760b0
+Escribe la ficha del modelo
+=== d0feaf7d
+Antes de usar un modelo, sus datos esenciales van en un documento de una página que pueda leer un revisor, un auditor o quien te sustituya. Rellena esta ficha (model card) para el modelo de abandono con las cifras que has calculado arriba:
+=== 38fbac2b
+Los huecos que no puedas rellenar son las lagunas de tu evaluación.
