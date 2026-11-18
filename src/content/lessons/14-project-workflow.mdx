@@ -390,12 +390,17 @@ The test stays in the repository forever, so this bug can never quietly return.
 
 <Lab title="The git workflow you'll use every day" time="20 min">
 
-Every team works the same way: **one branch per change, small commits, a pull request, review, merge.** In your `bramble-analysis` project:
+Every team works the same way: **one branch per change, small commits, a pull request, review, merge.**
+
+First, check that git is installed with `git --version`. If it isn't: on macOS run `xcode-select --install`; on Windows install [Git for Windows](https://git-scm.com/downloads); on Linux use your package manager (for example `sudo apt install git`). Tell git who you are once with `git config --global user.name "Your Name"` and `git config --global user.email you@example.com`. To push and open pull requests you also need an account on GitHub (or GitLab) and an empty repository there called `bramble-analysis`.
+
+Then, in your `bramble-analysis` project:
 
 ```bash
-git init
-printf ".venv/\ndata/\n__pycache__/\n.ipynb_checkpoints/\n*.joblib\n.env\n" > .gitignore
+git init                                      # harmless if uv init already made it a repository
+printf "data/\n.ipynb_checkpoints/\n*.joblib\n.env\n" >> .gitignore   # add to the .gitignore uv created
 git add . && git commit -m "Initial project"
+git remote add origin https://github.com/YOUR-USERNAME/bramble-analysis.git
 
 git switch -c monthly-revenue-metric          # 1. branch
 mkdir -p src/bramble tests                    # 2. add metrics.py and test_metrics.py from this lesson
