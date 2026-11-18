@@ -74,7 +74,15 @@ Esa última definición importa. «Ingresos por canal» podría significar igual
 Prepara tu propio entorno
 === 6014300a
 En el trabajo de hoy, los proyectos de Python se gestionan con **uv**: instala el propio Python, resuelve las dependencias en segundos y registra las versiones exactas en un lockfile. Instálalo desde [docs.astral.sh/uv](https://docs.astral.sh/uv/) y después:
-=== d9d4b49d
-Ahora tienes `pyproject.toml` y `uv.lock` (súbelos al repositorio), una carpeta `.venv/` (no la subas nunca) y las tablas de Bramble como archivos en `data/`. En un notebook nuevo, repite la consulta del cuarto trimestre con `orders = pd.read_parquet("data/orders.parquet")` y comprueba que obtienes el mismo total que arriba.
+=== 606bf326
+En un notebook nuevo, repite la consulta del cuarto trimestre con `orders = pd.read_parquet("data/orders.parquet")` y comprueba que obtienes el mismo total que arriba.
+=== e2356139
+Lo que uv ha creado en `bramble-analysis/`:
+=== ec08b8a1
+- `pyproject.toml` enumera los paquetes que necesita el proyecto; `uv.lock` registra sus versiones exactas. Estos dos archivos son los que compartes con tu equipo (poniéndolos bajo control de versiones, que se trata en la lección 14), para que todo el mundo tenga un entorno idéntico.
+- `.venv/` es el entorno en sí: Python más los paquetes instalados. Es solo de tu equipo, nunca se comparte, y `uv sync` lo reconstruye a partir de `uv.lock` en cualquier momento.
+- `data/` contiene las tablas de Bramble como archivos.
+=== 0618f903
+¿No ves `.venv`? En macOS y Linux, los nombres que empiezan por punto están ocultos. Ejecuta `ls -a` en la carpeta del proyecto, o pulsa <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>.</kbd> en el Finder de macOS. Puede que también veas una carpeta `.git/` y un archivo `.gitignore`: si tienes git instalado, `uv init` convirtió el proyecto en un repositorio de git sin avisar, ya configurado para dejar fuera `.venv`. Todavía no necesitas git; la lección 14 explica cómo instalarlo y usarlo.
 === ddbeac51
 ¿Prefieres VS Code? Abre la carpeta, instala las extensiones de Python y Jupyter y elige `.venv` como intérprete. Las dos opciones son habituales; usa la que use tu equipo.

@@ -189,7 +189,15 @@ uv run python -c "import dsw; print(dsw.export('data'))"
 uv run jupyter lab
 ```
 
-You now have `pyproject.toml` and `uv.lock` (commit both), a `.venv/` (never commit it), and the Bramble tables as files in `data/`. In a new notebook, re-run the Q4 query with `orders = pd.read_parquet("data/orders.parquet")` and confirm you get the same total as above.
+In a new notebook, re-run the Q4 query with `orders = pd.read_parquet("data/orders.parquet")` and confirm you get the same total as above.
+
+What uv created in `bramble-analysis/`:
+
+- `pyproject.toml` lists the packages the project needs; `uv.lock` records their exact versions. These two files are what you share with your team (by putting them under version control, which lesson 14 covers), so that everyone gets an identical environment.
+- `.venv/` is the environment itself: Python plus the installed packages. It belongs to your machine only, it's never shared, and `uv sync` rebuilds it from `uv.lock` at any time.
+- `data/` holds the Bramble tables as files.
+
+Can't see `.venv`? On macOS and Linux, names that start with a dot are hidden. Run `ls -a` in the project folder, or press <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>.</kbd> in the macOS Finder. You may also spot a `.git/` folder and a `.gitignore` file: if git is installed on your machine, `uv init` quietly set the project up as a git repository, already configured to leave `.venv` out. You don't need git yet; lesson 14 shows how to install and use it.
 
 Prefer VS Code? Open the folder, install the Python and Jupyter extensions, and pick `.venv` as the interpreter. Both are common; use whichever your team uses.
 

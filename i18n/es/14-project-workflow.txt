@@ -80,8 +80,12 @@ los tests siguen fallando: lee la salida de pytest de arriba. Filtra primero los
 El test se queda en el repositorio para siempre, así que este error nunca podrá volver sin que nadie lo note.
 === e6454102
 El flujo de git que usarás todos los días
-=== d521bd25
-Todos los equipos trabajan igual: **una rama por cambio, commits pequeños, un pull request, revisión y merge.** En tu proyecto `bramble-analysis`:
+=== 4de5f8ef
+Todos los equipos trabajan igual: **una rama por cambio, commits pequeños, un pull request, revisión y merge.**
+=== c850fdf6
+Primero, comprueba que git está instalado con `git --version`. Si no lo está: en macOS ejecuta `xcode-select --install`; en Windows instala [Git for Windows](https://git-scm.com/downloads); en Linux usa tu gestor de paquetes (por ejemplo, `sudo apt install git`). Dile a git quién eres, una sola vez, con `git config --global user.name "Tu Nombre"` y `git config --global user.email tu@ejemplo.com`. Para hacer push y abrir pull requests necesitas además una cuenta en GitHub (o GitLab) y un repositorio vacío allí llamado `bramble-analysis`.
+=== 5b35d1cf
+Después, en tu proyecto `bramble-analysis`:
 === 0f9b9c2e
 Detalles que te delatan como alguien que ya ha hecho esto antes: commits que hacen una sola cosa cada uno, con un mensaje que dice *qué y por qué*; no subir nunca datos, credenciales ni `.venv`; `git pull --rebase` antes de hacer push; y notebooks subidos con las salidas borradas (`uv run jupyter nbconvert --clear-output --inplace notebooks/*.ipynb`, o la herramienta `nbstripout`).
 === 6491be5a
