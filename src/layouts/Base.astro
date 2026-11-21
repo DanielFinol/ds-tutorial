@@ -1,6 +1,6 @@
 ---
 import '../styles/global.css';
-import { LANGS, ui, type Lang } from '../lib/i18n';
+import { AUTHOR, LANGS, ui, type Lang } from '../lib/i18n';
 import { switchLang, url } from '../lib/paths';
 
 interface Props {
@@ -31,6 +31,14 @@ const others = LANGS.filter((l) => l !== lang);
     <script src="../lib/pwa.ts"></script>
   </head>
   <body data-lesson={lesson}>
+    <div class="author-bar">
+      <div class="wrap">
+        <a class="author-link" href={AUTHOR.url} title={t.authorLink}>
+          <span class="author-by">{t.byline}</span> <strong>{AUTHOR.name}</strong><span class="author-role"> · {t.authorRole}</span>
+          <span class="author-arrow" aria-hidden="true">→</span>
+        </a>
+      </div>
+    </div>
     <header class="site-header">
       <div class="wrap">
         <a class="brand" href={url('', lang)}>{t.brand[0]} <span>{t.brand[1]}</span></a>
