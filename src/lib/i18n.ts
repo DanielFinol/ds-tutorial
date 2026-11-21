@@ -2,6 +2,8 @@
 export const LANGS = ['en', 'es'] as const;
 export type Lang = (typeof LANGS)[number];
 
+export const AUTHOR = { name: 'Daniel E. Finol-González', url: 'https://danielfinol.github.io/' };
+
 export const ui = {
   en: {
     langName: 'English',
@@ -28,6 +30,9 @@ export const ui = {
     copySolution: 'Copy into editor',
     solved: 'solved',
     onYourMachine: 'On your machine',
+    byline: 'By',
+    authorRole: 'Computer & Data Scientist',
+    authorLink: 'About the author',
   },
   es: {
     langName: 'Español',
@@ -54,6 +59,9 @@ export const ui = {
     copySolution: 'Copiar al editor',
     solved: 'resuelto',
     onYourMachine: 'En tu equipo',
+    byline: 'Por',
+    authorRole: 'Computer & Data Scientist',
+    authorLink: 'Página de presentación y CV',
   },
 } as const;
 

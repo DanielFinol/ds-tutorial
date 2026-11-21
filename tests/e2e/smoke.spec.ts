@@ -59,3 +59,13 @@ test('Spanish version: home, language switch and lesson pages', async ({ page })
   await page.getByRole('link', { name: 'Español' }).click();
   await expect(page).toHaveURL(/es\/lessons\/01-first-ticket\/$/);
 });
+
+test('every page links to the author landing page', async ({ page }) => {
+  for (const path of ['./', 'lessons/03-pandas/', 'es/', 'es/lessons/03-pandas/']) {
+    await page.goto(path);
+    const link = page.locator('.author-bar a');
+    await expect(link, path).toBeVisible();
+    await expect(link, path).toHaveAttribute('href', 'https://danielfinol.github.io/');
+    await expect(link, path).toContainText('Daniel E. Finol-González');
+  }
+});
